@@ -1,0 +1,10 @@
+[package]
+name = "kchaos"
+version = "0.1.0"
+edition = "2018"
+description = "the userspace client of chaos-driver"
+
+[dependencies]
+structopt = { version = "0.3", default-features = false }
+nix = {version = "0.22"}
+anyhow = {version="1.0"}

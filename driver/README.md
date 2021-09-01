@@ -33,11 +33,11 @@ struct chaos_injection {
     
     __u32 injector_type;
     void* injector_arg;
-    size_t injector_size;
+    size_t injector_arg_size;
 }
 ```
 
-The `matcher_arg` and `injector_arg` will be copied from the userspace, and construct/store the injection.
+The `matcher_arg` and `injector_arg` will be copied from the userspace, and the driver will use them to construct/store the injection.
 
 ```c
 struct add_injection {

@@ -25,3 +25,5 @@ modules.builtin
 *.mod
 *.
 *.symvers
+
+/target/**/*

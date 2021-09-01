@@ -1,21 +1,10 @@
-// Copyright 2021 Chaos Mesh Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/slab.h>
-#include "./config.h"
-#include "./chaos_device.h"
+#include "config.h"
+#include "chaos_device.h"
+#include "protocol.h"
+#include "injection.h"
 
 int chaos_char_device_open(struct inode *inode, struct file *filp)
 {
@@ -29,21 +18,7 @@ ssize_t chaos_char_device_read(struct file *flip, char __user *content, size_t l
 
 ssize_t chaos_char_device_write(struct file *flip, const char __user *user_content, size_t length, loff_t *offset)
 {
-    int ret = 0;
-    char *content;
-
-    content = kmalloc(length, GFP_KERNEL);
-    if (copy_from_user(content, user_content, length))
-    {
-        ret = -EINVAL;
-        goto cleanup_content;
-    }
-    pr_info(MODULE_NAME ": write %.*s\n", (int)length, content);
-    ret = (int)length;
-
-cleanup_content:
-    kfree(content);
-    return ret;
+    return 0;
 }
 
 int chaos_char_device_release(struct inode *inode, struct file *filp)
@@ -53,6 +28,32 @@ int chaos_char_device_release(struct inode *inode, struct file *filp)
 
 long chaos_char_device_ioctl(struct file *flip, unsigned int cmd, unsigned long arg)
 {
+    int ret = 0;
+    union
+    {
+        struct chaos_injection injection;
+    } kernel_parameter;
+
+    switch (cmd)
+    {
+    case GET_VERSION:
+        return MODULE_PROTOCOL_VERSION;
+        break;
+    case ADD_INJECTION:
+        if (copy_from_user(&kernel_parameter.injection, (void *)arg, sizeof(struct chaos_injection)))
+        {
+            ret = -EINVAL;
+            return ret;
+        }
+        return inject(&kernel_parameter.injection);
+
+        break;
+    case DELETE_INJECTION:
+        break;
+    default:
+        break;
+    }
+
     return 0;
 }
 
