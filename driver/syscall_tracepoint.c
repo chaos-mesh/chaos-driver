@@ -1,6 +1,9 @@
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 
+#include <linux/delay.h>
+
+#include "config.h"
 #include "syscall_tracepoint.h"
 
 __u32 tracepoint_registered = 0;
@@ -29,6 +32,7 @@ int register_syscall_tracepoint(void)
             return ret;
         }
 
+        pr_info(MODULE_NAME ": tracepoint registered");
         // the tracepoint has been registered successfully
         tracepoint_registered = 1;
         return 0;
@@ -44,8 +48,8 @@ struct executor_list_node
     struct list_head list;
 };
 
-struct executor_list_node *executors;
-DEFINE_RWLOCK(executor_list_lock);
+static LIST_HEAD(executor_list);
+static DEFINE_RWLOCK(executor_list_lock);
 
 int executor_add(struct tracepoint_executor executor)
 {
@@ -60,6 +64,7 @@ int executor_add(struct tracepoint_executor executor)
         ret = register_syscall_tracepoint();
         if (ret != 0)
         {
+            pr_err(MODULE_NAME ": err(%d), fail to register tracepoint\n", ret);
             goto release;
         }
     }
@@ -74,15 +79,7 @@ int executor_add(struct tracepoint_executor executor)
     INIT_LIST_HEAD(&node->list);
     node->executor = executor;
 
-    write_lock(&executor_list_lock);
-    if (executors == NULL)
-    {
-        executors = node;
-    }
-    else
-    {
-        list_add_tail(&node->list, &executors->list);
-    }
+    list_add_tail(&node->list, &executor_list);
 
 release:
     write_unlock(&executor_list_lock);
@@ -93,38 +90,11 @@ int executor_del(__u32 id)
 {
     int ret = 0;
     struct executor_list_node *e;
+    struct executor_list_node *tmp;
 
     write_lock(&executor_list_lock);
 
-    if (executors == NULL)
-    {
-        ret = ENOENT;
-        goto release;
-    }
-
-    // if the list is empty, which means it has only one object, if it's deleted, we should free it
-    if (list_empty(&executors->list))
-    {
-        if (id == executors->executor.id)
-        {
-            kfree(executors);
-            executors = NULL;
-
-            // if the tracepoint is not empty, it should be unregistered.
-            if (tracepoint_registered)
-            {
-                ret = tracepoint_probe_unregister(tp_sys_exit, syscall_exit_probe, NULL);
-                goto release;
-            }
-        }
-        else
-        {
-            ret = ENOENT;
-            goto release;
-        }
-    }
-
-    list_for_each_entry(e, &executors->list, list)
+    list_for_each_entry_safe(e, tmp, &executor_list, list)
     {
         if (e->executor.id == id)
         {
@@ -138,6 +108,15 @@ int executor_del(__u32 id)
 
 release:
     write_unlock(&executor_list_lock);
+
+    if (ret == 0 && list_empty(&executor_list) && tracepoint_registered)
+    {
+        ret = tracepoint_probe_unregister(tp_sys_exit, syscall_exit_probe, NULL);
+        if (ret == 0)
+        {
+            tracepoint_registered = 0;
+        }
+    }
     return ret;
 }
 
@@ -145,15 +124,11 @@ int executor_free_all(void)
 {
     int ret = 0;
     struct executor_list_node *e;
+    struct executor_list_node *tmp;
 
     write_lock(&executor_list_lock);
 
-    if (executors == NULL)
-    {
-        goto release;
-    }
-
-    list_for_each_entry(e, &executors->list, list)
+    list_for_each_entry_safe(e, tmp, &executor_list, list)
     {
         list_del(&e->list);
         kfree(e);
@@ -163,9 +138,12 @@ int executor_free_all(void)
     if (tracepoint_registered)
     {
         ret = tracepoint_probe_unregister(tp_sys_exit, syscall_exit_probe, NULL);
+        if (ret == 0)
+        {
+            tracepoint_registered = 0;
+        }
     }
 
-release:
     write_unlock(&executor_list_lock);
     return ret;
 }
@@ -176,12 +154,7 @@ TRACEPOINT_PROBE(syscall_exit_probe, struct pt_regs *regs, long ret)
 
     read_lock(&executor_list_lock);
 
-    if (executors == NULL)
-    {
-        return;
-    }
-
-    list_for_each_entry(e, &executors->list, list)
+    list_for_each_entry(e, &executor_list, list)
     {
         e->executor.executor(e->executor.context, regs, ret);
     }

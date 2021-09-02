@@ -12,6 +12,7 @@ struct tracepoint_executor
 {
     __u32 id;
 
+    // manually simulate closure
     void *context;
     void (*executor)(void *, struct pt_regs *regs, long ret);
 };
