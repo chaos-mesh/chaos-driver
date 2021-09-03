@@ -15,7 +15,7 @@ One injection can be described with an "event listener" and an "injector". Diffe
 
 ## Userspace Communication
 
-All communication are through `/dev/chaos`, and the `ioctl` system calls. All following sections could be sent with the `ioctl` syscall. For example, the "Add Injection" could be used by calling `ioctl(fd, ADD_INJECTION, struct {void *arg, size_t length})`, where the `arg` is a `struct add_injection*` described below, and the length is the size of this struct, which is `sizeof(struct add_injection)`.
+All communication are through `/dev/chaos`, and the `ioctl` system calls. All following sections could be sent with the `ioctl` syscall. For example, the "Add Injection" could be used by calling `ioctl(fd, ADD_INJECTION, void *arg)`, where the `arg` is a `struct add_injection*` described below.
 
 All structs below are fully packed, with no padding. The return number is always zero or positive, when it's negative, it means the opposite of the error number.
 
