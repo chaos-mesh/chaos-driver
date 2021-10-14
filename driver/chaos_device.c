@@ -28,7 +28,7 @@ int chaos_char_device_release(struct inode *inode, struct file *filp)
 
 long chaos_char_device_ioctl(struct file *flip, unsigned int cmd, unsigned long arg)
 {
-    int ret = 0;
+    unsigned long ret = 0, err = 0;
     union
     {
         struct chaos_injection injection;
@@ -45,10 +45,20 @@ long chaos_char_device_ioctl(struct file *flip, unsigned int cmd, unsigned long 
             ret = -EINVAL;
             return ret;
         }
-        return inject(&kernel_parameter.injection);
+        err = inject(&kernel_parameter.injection, &ret);
+        if (err != 0) {
+            ret = -err;
+            return ret;
+        }
+
+        return ret;
 
         break;
     case DELETE_INJECTION:
+        ret = recover(arg);
+
+        return ret;
+
         break;
     default:
         break;
@@ -106,7 +116,7 @@ int register_chaos_device()
         goto err;
     }
 
-    // create device node /dev/mychardev-x where "x" is "i", equal to the Minor number
+    // create device node
     device = device_create(chrdev_class, NULL, dev, NULL, MODULE_DEVICE_NAME);
     if (IS_ERR(device))
     {

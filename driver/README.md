@@ -54,3 +54,7 @@ struct delete_injection {
     __u32 id;
 }
 ```
+
+## TODO
+
+1. There are a lot of lists. However, some of them should use a hash table.

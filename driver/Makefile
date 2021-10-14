@@ -1,4 +1,4 @@
-chaos_driver-y += main.o chaos_device.o injection.o syscall_tracepoint.o
+chaos_driver-y += main.o chaos_device.o injection.o syscall_tracepoint.o fs_injection.o
 obj-m += chaos_driver.o
 
 KVERSION ?= $(shell uname -r)

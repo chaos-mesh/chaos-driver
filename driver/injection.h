@@ -3,23 +3,14 @@
 #ifndef INJECTION_H
 #define INJECTION_H
 
-long inject(struct chaos_injection *injection);
+unsigned long get_id(void);
 
-long build_fs_syscall_injection(struct chaos_injection *injection);
+long inject(struct chaos_injection *injection, unsigned long *id);
+int recover(unsigned long id);
 
 enum matcher_type
 {
     MATCHER_TYPE_FS_SYSCALL = 0,
 };
-
-struct fs_syscall_injection_parameter
-{
-    char __user *path;
-    size_t path_len;
-
-    __u8 recursive;
-
-    pid_t pid;
-} __attribute__((packed));
 
 #endif

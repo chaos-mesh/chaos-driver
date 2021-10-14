@@ -14,11 +14,17 @@ struct tracepoint_executor
 
     // manually simulate closure
     void *context;
+    // the first argument of this function is the context
     void (*executor)(void *, struct pt_regs *regs, long ret);
 };
 
-int executor_add(struct tracepoint_executor executor);
-int executor_del(__u32 id);
-int executor_free_all(void);
+int syscall_tracepoint_executor_add(struct tracepoint_executor executor);
+int syscall_tracepoint_executor_del(__u32 id);
+int syscall_tracepoint_executor_free_all(void);
+
+enum executor_id
+{
+    EXECUTOR_ID_FS_INJECTION = 0,
+};
 
 #endif

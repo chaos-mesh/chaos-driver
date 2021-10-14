@@ -6,5 +6,8 @@ description = "the userspace client of chaos-driver"
 
 [dependencies]
 structopt = { version = "0.3", default-features = false }
-nix = {version = "0.22"}
+nix = {version = "0.23"}
 anyhow = {version="1.0"}
+libc = "0.2"
+serde = {version = "1.0", features = ["derive"]}
+serde_json = "1.0"
