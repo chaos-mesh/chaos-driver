@@ -45,10 +45,40 @@ impl Into<RawFsSyscall> for FsSyscall {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-#[repr(C, packed)]
+impl Drop for RawFsSyscall {
+    fn drop(&mut self) {
+        if self.folder != 0 {
+            unsafe { libc::close(self.folder) };
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Bio {
+    dev: CString,
+}
+
+#[repr(C, packed)]
+pub struct RawBio {
     dev: u32,
+}
+
+impl Into<RawBio> for Bio {
+    fn into(self) -> RawBio {
+        let fd = if self.dev.len() > 0 {
+            unsafe { libc::open(self.dev.as_ptr(), libc::O_DIRECTORY) }
+        } else {
+            return RawBio { dev: 0 };
+        };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+
+        // TODO: handle errors for the following syscall
+        unsafe {libc::fstat(fd, &mut stat)};
+        unsafe {libc::close(fd)};
+        RawBio {
+            dev: stat.st_dev as u32,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

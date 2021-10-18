@@ -31,9 +31,9 @@ struct bio_injector_delay_args {
     __u64 delay;
 }__attribute__((packed));
 
-TRACEPOINT_PROBE(block_bio_complete_probe, struct pt_regs *regs, struct bio* bio);
+TRACEPOINT_PROBE(block_bio_queue_probe, struct bio* bio);
 
-int register_block_bio_complete_tracepoint_executor(void);
+int register_block_bio_queue_tracepoint_executor(void);
 
 int bio_injection_executor_add(struct bio_injection_executor_node executor);
 
@@ -94,36 +94,36 @@ static DEFINE_RWLOCK(bio_injection_executor_list_lock);
 // This variable is protected by the `bio_injection_executor_list_lock`
 __u32 bio_tracepoint_registered = 0;
 
-struct tracepoint *tp_block_bio_complete;
+struct tracepoint *tp_block_bio_queue;
 void bio_visit_tracepoint(struct tracepoint *tp, void *priv)
 {
-    if (!strcmp(tp->name, "block_bio_complete"))
+    if (!strcmp(tp->name, "block_bio_queue"))
     {
-        tp_block_bio_complete = tp;
+        tp_block_bio_queue = tp;
     }
 }
 
-int register_block_bio_complete_tracepoint(void)
+int register_block_bio_queue_tracepoint(void)
 {
     int ret = 0;
 
     for_each_kernel_tracepoint(bio_visit_tracepoint, NULL);
 
-    if (tp_block_bio_complete != NULL)
+    if (tp_block_bio_queue != NULL)
     {
-        ret = tracepoint_probe_register(tp_block_bio_complete, block_bio_complete_probe, NULL);
+        ret = tracepoint_probe_register(tp_block_bio_queue, block_bio_queue_probe, NULL);
         if (ret != 0)
         {
             return ret;
         }
 
-        pr_info(MODULE_NAME ": block_bio_complete tracepoint registered");
+        pr_info(MODULE_NAME ": block_bio_queue tracepoint registered");
         // the tracepoint has been registered successfully
         bio_tracepoint_registered = 1;
         return 0;
     }
 
-    // fail to find the sys_exit tracepoint
+    // fail to find the block_bio_queue tracepoint
     return ENOENT;
 }
 
@@ -139,7 +139,7 @@ int bio_injection_executor_add(struct bio_injection_executor_node executor)
     // lazily create the list and register tracepoint
     if (bio_tracepoint_registered == 0)
     {
-        ret = register_block_bio_complete_tracepoint();
+        ret = register_block_bio_queue_tracepoint();
         if (ret != 0)
         {
             pr_err(MODULE_NAME ": err(%d), fail to register tracepoint\n", ret);
@@ -197,7 +197,7 @@ int bio_injection_executor_del(unsigned long id)
 release:
     if (ret == 0 && list_empty(&bio_injection_executor_list) && bio_tracepoint_registered)
     {
-        ret = tracepoint_probe_unregister(tp_block_bio_complete, block_bio_complete_probe, NULL);
+        ret = tracepoint_probe_unregister(tp_block_bio_queue, block_bio_queue_probe, NULL);
         if (ret == 0)
         {
             bio_tracepoint_registered = 0;
@@ -225,7 +225,7 @@ int bio_injection_executor_free_all(void)
     // if the tracepoint is not empty, it should be unregistered.
     if (bio_tracepoint_registered)
     {
-        ret = tracepoint_probe_unregister(tp_block_bio_complete, block_bio_complete_probe, NULL);
+        ret = tracepoint_probe_unregister(tp_block_bio_queue, block_bio_queue_probe, NULL);
         if (ret == 0)
         {
             bio_tracepoint_registered = 0;
@@ -242,7 +242,7 @@ void bio_injector_delay(void *args)
     mdelay(delay_args->delay);
 }
 
-TRACEPOINT_PROBE(block_bio_complete_probe, struct pt_regs *regs, struct bio* bio)
+TRACEPOINT_PROBE(block_bio_queue_probe, struct bio* bio)
 {
     struct bio_injection_executor_node *e;
 
@@ -250,11 +250,11 @@ TRACEPOINT_PROBE(block_bio_complete_probe, struct pt_regs *regs, struct bio* bio
 
     list_for_each_entry(e, &bio_injection_executor_list, list)
     {
-        pr_info("on dev(%u) \n", bio->bi_bdev->bd_dev);
-
-        if (bio->bi_bdev->bd_dev == e->injection.dev) {
-            e->injection.injector(e->injection.injector_args);
+        if (e->injection.dev != 0 && bio->bi_bdev->bd_dev != e->injection.dev) {
+            continue;
         }
+
+        e->injection.injector(e->injection.injector_args);
     }
 
     read_unlock(&bio_injection_executor_list_lock);

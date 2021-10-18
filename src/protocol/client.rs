@@ -79,8 +79,8 @@ impl Client {
             }
             Matcher::Bio(bio) => {
                 let matcher_type = MATCHER_TYPE_BIO;
-                let matcher_arg = &bio as *const Bio as *const c_void;
-                let matcher_arg_size = std::mem::size_of::<Bio>();
+                let matcher_arg = &bio.into() as *const RawBio as *const c_void;
+                let matcher_arg_size = std::mem::size_of::<RawBio>();
 
                 match injection.injector {
                     Injector::Delay(delay) => {
