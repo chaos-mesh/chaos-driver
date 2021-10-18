@@ -32,7 +32,7 @@ fn main() -> Result<()> {
             let id = client.inject(injection)?;
             println!("Injected Chaos ID: {}", id);
         }
-        KChaos::Recover { id} => {
+        KChaos::Recover { id } => {
             let client = Client::build()?;
 
             client.recover(id)?;

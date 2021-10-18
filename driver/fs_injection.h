@@ -21,8 +21,4 @@ enum injector_type
     INJECTOR_TYPE_DELAY = 0,
 };
 
-struct injector_delay_args {
-    __u64 delay;
-};
-
 #endif

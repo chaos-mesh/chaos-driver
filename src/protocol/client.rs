@@ -1,7 +1,7 @@
 use anyhow::Result;
 use nix::{
     fcntl::{open, OFlag},
-    ioctl_none, ioctl_write_ptr, ioctl_write_int,
+    ioctl_none, ioctl_write_int, ioctl_write_ptr,
     sys::stat::Mode,
 };
 
@@ -28,6 +28,7 @@ pub struct ChaosInjection {
 }
 
 const MATCHER_TYPE_FS_SYSCALL: u32 = 0;
+const MATCHER_TYPE_BIO: u32 = 1;
 const INJECTOR_TYPE_DELAY: u32 = 0;
 
 ioctl_write_ptr!(
@@ -37,7 +38,7 @@ ioctl_write_ptr!(
     ChaosInjection
 );
 
-ioctl_write_int!(chaos_driver_chaos_recover,CHAOS_IOCTL_MAGIC, 2);
+ioctl_write_int!(chaos_driver_chaos_recover, CHAOS_IOCTL_MAGIC, 2);
 
 impl Client {
     pub fn build() -> Result<Self> {
@@ -55,18 +56,43 @@ impl Client {
                 let matcher_type = MATCHER_TYPE_FS_SYSCALL;
                 let matcher_arg = &fs_syscall.into() as *const RawFsSyscall as *const c_void;
                 let matcher_arg_size = std::mem::size_of::<RawFsSyscall>();
-                
+
                 match injection.injector {
                     Injector::Delay(delay) => {
                         let injector_type = INJECTOR_TYPE_DELAY;
                         let injector_arg = &delay as *const Delay as *const c_void;
                         let injector_arg_size = std::mem::size_of::<Delay>();
-        
+
                         let raw_injection = ChaosInjection {
                             matcher_type,
                             matcher_arg,
                             matcher_arg_size,
-                
+
+                            injector_type,
+                            injector_arg,
+                            injector_arg_size,
+                        };
+
+                        Ok(unsafe { chaos_driver_chaos_inject(self.fd, &raw_injection)? })
+                    }
+                }
+            }
+            Matcher::Bio(bio) => {
+                let matcher_type = MATCHER_TYPE_BIO;
+                let matcher_arg = &bio as *const Bio as *const c_void;
+                let matcher_arg_size = std::mem::size_of::<Bio>();
+
+                match injection.injector {
+                    Injector::Delay(delay) => {
+                        let injector_type = INJECTOR_TYPE_DELAY;
+                        let injector_arg = &delay as *const Delay as *const c_void;
+                        let injector_arg_size = std::mem::size_of::<Delay>();
+
+                        let raw_injection = ChaosInjection {
+                            matcher_type,
+                            matcher_arg,
+                            matcher_arg_size,
+
                             injector_type,
                             injector_arg,
                             injector_arg_size,

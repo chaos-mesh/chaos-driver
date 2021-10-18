@@ -49,12 +49,9 @@ The return value will be the id of the injection, with which you can delete the 
 
 ### Delete Injection
 
-```c
-struct delete_injection {
-    __u32 id;
-}
-```
+As the delete injection only passes the id, the third argument of `ioctl` is just the id.
 
 ## TODO
 
 1. There are a lot of lists. However, some of them should use a hash table.
+2. Some `RwLock` can turn to use RCU.

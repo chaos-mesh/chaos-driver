@@ -31,26 +31,31 @@ pub struct RawFsSyscall {
 impl Into<RawFsSyscall> for FsSyscall {
     fn into(self) -> RawFsSyscall {
         let fd = if self.folder.len() > 0 {
-           unsafe {
-                libc::open(self.folder.as_ptr(), libc::O_DIRECTORY)
-            }
+            unsafe { libc::open(self.folder.as_ptr(), libc::O_DIRECTORY) }
         } else {
             0
         };
-        
+
         return RawFsSyscall {
             folder: fd,
             recursive: self.recursive,
             syscall: self.syscall,
             pid: self.pid,
-        }
+        };
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[repr(C, packed)]
+pub struct Bio {
+    dev: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "matcher", rename_all = "snake_case")]
 pub enum Matcher {
     FsSyscall(FsSyscall),
+    Bio(Bio),
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]

@@ -6,6 +6,7 @@
 
 #include "injection.h"
 #include "fs_injection.h"
+#include "bio_injection.h"
 
 static atomic_long_t injection_id = ATOMIC_LONG_INIT(0);
 
@@ -56,6 +57,30 @@ long inject(struct chaos_injection *injection, unsigned long *id_out)
 
         write_unlock(&injection_list_lock);
         break;
+    case MATCHER_TYPE_BIO:
+        ret = build_bio_injection(id, injection);
+        if (ret != 0)
+        {
+            return ret;
+        }
+
+        write_lock(&injection_list_lock);
+
+        // allocate the injection node and add it to the existing link list
+        node = kmalloc(sizeof(struct injection_node), GFP_KERNEL);
+        if (node == NULL)
+        {
+            ret = ENOMEM;
+            bio_injection_executor_del(id);
+            return ret;
+        }
+        node->id = id;
+        node->del = bio_injection_executor_del;
+        INIT_LIST_HEAD(&node->list);
+        list_add_tail(&node->list, &injection_list);
+
+        write_unlock(&injection_list_lock);
+        break;
     default:
         break;
     }
@@ -86,7 +111,7 @@ int recover(unsigned long id)
 
     write_unlock(&injection_list_lock);
 
-    pr_info("injection(%d) recovered\n", id);
+    pr_info("injection(%lu) recovered\n", id);
 
     return ret;
 }

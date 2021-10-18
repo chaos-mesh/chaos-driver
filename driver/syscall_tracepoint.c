@@ -6,10 +6,10 @@
 #include "config.h"
 #include "syscall_tracepoint.h"
 
-__u32 tracepoint_registered = 0;
+__u32 sys_exit_tracepoint_registered = 0;
 struct tracepoint *tp_sys_exit;
 
-void visit_tracepoint(struct tracepoint *tp, void *priv)
+void syscall_visit_tracepoint(struct tracepoint *tp, void *priv)
 {
     if (!strcmp(tp->name, "sys_exit"))
     {
@@ -22,7 +22,7 @@ int register_syscall_tracepoint(void)
 {
     int ret = 0;
 
-    for_each_kernel_tracepoint(visit_tracepoint, NULL);
+    for_each_kernel_tracepoint(syscall_visit_tracepoint, NULL);
 
     if (tp_sys_exit != NULL)
     {
@@ -34,7 +34,7 @@ int register_syscall_tracepoint(void)
 
         pr_info(MODULE_NAME ": tracepoint registered");
         // the tracepoint has been registered successfully
-        tracepoint_registered = 1;
+        sys_exit_tracepoint_registered = 1;
         return 0;
     }
 
@@ -59,7 +59,7 @@ int syscall_tracepoint_executor_add(struct tracepoint_executor executor)
     write_lock(&syscall_tracepoint_executor_list_lock);
 
     // lazily create the list and register tracepoint
-    if (tracepoint_registered == 0)
+    if (sys_exit_tracepoint_registered == 0)
     {
         ret = register_syscall_tracepoint();
         if (ret != 0)
@@ -111,12 +111,12 @@ int syscall_tracepoint_executor_del(__u32 id)
     ret = ENOENT;
 
 release:
-    if (ret == 0 && list_empty(&syscall_tracepoint_executor_list) && tracepoint_registered)
+    if (ret == 0 && list_empty(&syscall_tracepoint_executor_list) && sys_exit_tracepoint_registered)
     {
         ret = tracepoint_probe_unregister(tp_sys_exit, syscall_exit_probe, NULL);
         if (ret == 0)
         {
-            tracepoint_registered = 0;
+            sys_exit_tracepoint_registered = 0;
         }
     }
 
@@ -143,12 +143,12 @@ int syscall_tracepoint_executor_free_all(void)
     }
 
     // if the tracepoint is not empty, it should be unregistered.
-    if (tracepoint_registered)
+    if (sys_exit_tracepoint_registered)
     {
         ret = tracepoint_probe_unregister(tp_sys_exit, syscall_exit_probe, NULL);
         if (ret == 0)
         {
-            tracepoint_registered = 0;
+            sys_exit_tracepoint_registered = 0;
         }
     }
 

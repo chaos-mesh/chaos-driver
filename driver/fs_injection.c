@@ -36,6 +36,10 @@ struct fs_injection_executor_node
     struct list_head list;
 };
 
+struct fs_injector_delay_args {
+    __u64 delay;
+}__attribute__((packed));
+
 void fs_injection_executor(void *_, struct pt_regs *regs, long ret);
 
 void injector_delay(void *args, struct pt_regs *regs, long ret);
@@ -167,7 +171,7 @@ release:
     return ret;
 }
 
-void free_node(struct fs_injection_executor_node *e)
+void fs_free_node(struct fs_injection_executor_node *e)
 {
     if (e->injection.injector_args != NULL)
     {
@@ -193,11 +197,7 @@ int fs_injection_executor_del(unsigned long id)
         if (e->id == id)
         {
             list_del(&e->list);
-            if (e->injection.injector_args != NULL)
-            {
-                kfree(e->injection.injector_args);
-            }
-            kfree(e);
+            fs_free_node(e);
             goto release;
         }
     }
@@ -306,7 +306,7 @@ void fs_injection_executor(void *_, struct pt_regs *regs, long ret)
 
 void injector_delay(void *args, struct pt_regs *regs, long ret)
 {
-    struct injector_delay_args *delay_args = args;
+    struct fs_injector_delay_args *delay_args = args;
     mdelay(delay_args->delay);
 }
 
