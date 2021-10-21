@@ -1,6 +1,7 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
 #include "config.h"
 #include "chaos_device.h"
 #include "protocol.h"

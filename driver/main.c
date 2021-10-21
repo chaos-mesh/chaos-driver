@@ -29,7 +29,6 @@ static int __init chaos_main(void)
 {
     // Return value of the function
     int ret = 0;
-    struct tracepoint_executor test_executor;
 
     pr_info(MODULE_NAME " is loading \n");
 

@@ -4,7 +4,6 @@
 #include <linux/uaccess.h>
 #include <linux/fs.h>
 #include <linux/file.h>
-#include <linux/fdtable.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 
@@ -12,6 +11,7 @@
 #include "fs_injection.h"
 #include "syscall_tracepoint.h"
 #include "protocol.h"
+#include "comp.h"
 
 struct fs_syscall_injection
 {
@@ -69,7 +69,7 @@ long build_fs_syscall_injection(unsigned long id, struct chaos_injection *inject
     {
         files = current->files;
 
-        inject_root = files_lookup_fd_rcu(files, argument.folder);
+        inject_root = files_lookup_fd(files, argument.folder);
         if (inject_root == NULL)
         {
             return EINVAL;
@@ -312,7 +312,7 @@ void injector_delay(void *args, struct pt_regs *regs, long ret)
 
 int should_inject_file(int fd, struct fs_injection_executor_node *e) {
     // TODO: not only verify the inode, we should also verify the mount
-    struct file *opened_file = files_lookup_fd_rcu(current->files, fd);
+    struct file *opened_file = files_lookup_fd(current->files, fd);
 
     int should_inject = 0;
     long target_ino = 0;

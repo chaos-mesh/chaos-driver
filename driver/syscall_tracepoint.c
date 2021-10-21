@@ -1,10 +1,10 @@
 #include <linux/spinlock.h>
 #include <linux/slab.h>
-
 #include <linux/delay.h>
 
 #include "config.h"
 #include "syscall_tracepoint.h"
+#include "comp.h"
 
 __u32 sys_exit_tracepoint_registered = 0;
 struct tracepoint *tp_sys_exit;
@@ -22,11 +22,11 @@ int register_syscall_tracepoint(void)
 {
     int ret = 0;
 
-    for_each_kernel_tracepoint(syscall_visit_tracepoint, NULL);
+    iter_tp(syscall_visit_tracepoint, NULL);
 
     if (tp_sys_exit != NULL)
     {
-        ret = tracepoint_probe_register(tp_sys_exit, syscall_exit_probe, NULL);
+        ret = compat_register_trace(syscall_exit_probe, "sys_exit", tp_sys_exit);
         if (ret != 0)
         {
             return ret;
@@ -113,11 +113,7 @@ int syscall_tracepoint_executor_del(__u32 id)
 release:
     if (ret == 0 && list_empty(&syscall_tracepoint_executor_list) && sys_exit_tracepoint_registered)
     {
-        ret = tracepoint_probe_unregister(tp_sys_exit, syscall_exit_probe, NULL);
-        if (ret == 0)
-        {
-            sys_exit_tracepoint_registered = 0;
-        }
+        compat_unregister_trace(syscall_exit_probe, "sys_exit", tp_sys_exit);
     }
 
     write_unlock(&syscall_tracepoint_executor_list_lock);
@@ -145,11 +141,7 @@ int syscall_tracepoint_executor_free_all(void)
     // if the tracepoint is not empty, it should be unregistered.
     if (sys_exit_tracepoint_registered)
     {
-        ret = tracepoint_probe_unregister(tp_sys_exit, syscall_exit_probe, NULL);
-        if (ret == 0)
-        {
-            sys_exit_tracepoint_registered = 0;
-        }
+        compat_unregister_trace(syscall_exit_probe, "sys_exit", tp_sys_exit);
     }
 
     write_unlock(&syscall_tracepoint_executor_list_lock);

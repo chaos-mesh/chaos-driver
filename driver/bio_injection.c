@@ -7,6 +7,7 @@
 #include "config.h"
 #include "bio_injection.h"
 #include "syscall_tracepoint.h"
+#include "comp.h"
 #include "protocol.h"
 
 struct bio_injection
@@ -107,11 +108,11 @@ int register_block_bio_queue_tracepoint(void)
 {
     int ret = 0;
 
-    for_each_kernel_tracepoint(bio_visit_tracepoint, NULL);
+    iter_tp(bio_visit_tracepoint, NULL);
 
     if (tp_block_bio_queue != NULL)
     {
-        ret = tracepoint_probe_register(tp_block_bio_queue, block_bio_queue_probe, NULL);
+        ret = compat_register_trace(block_bio_queue_probe, "block_bio_queue", tp_block_bio_queue);
         if (ret != 0)
         {
             return ret;
@@ -197,11 +198,7 @@ int bio_injection_executor_del(unsigned long id)
 release:
     if (ret == 0 && list_empty(&bio_injection_executor_list) && bio_tracepoint_registered)
     {
-        ret = tracepoint_probe_unregister(tp_block_bio_queue, block_bio_queue_probe, NULL);
-        if (ret == 0)
-        {
-            bio_tracepoint_registered = 0;
-        }
+        compat_unregister_trace(block_bio_queue_probe, "block_bio_queue", tp_block_bio_queue);
     }
 
     write_unlock(&bio_injection_executor_list_lock);
@@ -225,11 +222,7 @@ int bio_injection_executor_free_all(void)
     // if the tracepoint is not empty, it should be unregistered.
     if (bio_tracepoint_registered)
     {
-        ret = tracepoint_probe_unregister(tp_block_bio_queue, block_bio_queue_probe, NULL);
-        if (ret == 0)
-        {
-            bio_tracepoint_registered = 0;
-        }
+        compat_unregister_trace(block_bio_queue_probe, "block_bio_queue", tp_block_bio_queue);
     }
 
     write_unlock(&bio_injection_executor_list_lock);
