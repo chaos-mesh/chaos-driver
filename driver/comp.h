@@ -2,6 +2,9 @@
 #include <linux/tracepoint.h>
 #include <linux/fdtable.h>
 
+#ifndef COMP_H
+#define COMP_H
+
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0))
 
 #define iter_tp(VISIT, PRIV) \
@@ -50,3 +53,5 @@ static void compat_unregister_trace(void *func, const char *probename, struct tr
 	tracepoint_probe_unregister(tp, func, NULL);
 #endif
 }
+
+#endif

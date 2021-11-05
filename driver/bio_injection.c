@@ -133,7 +133,7 @@ int bio_injection_executor_add(struct bio_injection_executor_node executor)
     int ret = 0;
     struct bio_injection_executor_node *node;
 
-    pr_info("adding fs injection(%d)\n", executor.id);
+    pr_info("adding bio injection(%d)\n", executor.id);
 
     write_lock(&bio_injection_executor_list_lock);
 
