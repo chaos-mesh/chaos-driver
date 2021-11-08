@@ -27,3 +27,5 @@ modules.builtin
 *.symvers
 
 /target/**/*
+
+!/buildkit/go.mod
