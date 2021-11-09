@@ -28,7 +28,7 @@ pub struct ChaosInjection {
 }
 
 const MATCHER_TYPE_FS_SYSCALL: u32 = 0;
-const MATCHER_TYPE_BIO: u32 = 1;
+const MATCHER_TYPE_BLK_IO: u32 = 1;
 const INJECTOR_TYPE_DELAY: u32 = 0;
 
 ioctl_write_ptr!(
@@ -77,10 +77,10 @@ impl Client {
                     }
                 }
             }
-            Matcher::Bio(bio) => {
-                let matcher_type = MATCHER_TYPE_BIO;
-                let matcher_arg = &bio.into() as *const RawBio as *const c_void;
-                let matcher_arg_size = std::mem::size_of::<RawBio>();
+            Matcher::BlkIo(blk_io) => {
+                let matcher_type = MATCHER_TYPE_BLK_IO;
+                let matcher_arg = &blk_io.into() as *const RawBlkIo as *const c_void;
+                let matcher_arg_size = std::mem::size_of::<RawBlkIo>();
 
                 match injection.injector {
                     Injector::Delay(delay) => {

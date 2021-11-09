@@ -155,8 +155,7 @@ ln -sf /usr/bin/gcc-{{ .GCCVersion }} /usr/bin/gcc
 
 # Build the kernel module
 make KBUILD_PATH=/tmp/kernel all
-# Print results
-modinfo falco.ko
+cp /tmp/centos-build/chaos_driver.ko {{ .DriverBuildDir }}/chaos_driver.ko
 `
 
 func centosGccVersionFromKernelRelease(kr kernelrelease.KernelRelease) string {

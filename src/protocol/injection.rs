@@ -54,28 +54,28 @@ impl Drop for RawFsSyscall {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Bio {
+pub struct BlkIo {
     dev: CString,
 }
 
 #[repr(C, packed)]
-pub struct RawBio {
+pub struct RawBlkIo {
     dev: u32,
 }
 
-impl Into<RawBio> for Bio {
-    fn into(self) -> RawBio {
+impl Into<RawBlkIo> for BlkIo {
+    fn into(self) -> RawBlkIo {
         let fd = if self.dev.len() > 0 {
             unsafe { libc::open(self.dev.as_ptr(), libc::O_DIRECTORY) }
         } else {
-            return RawBio { dev: 0 };
+            return RawBlkIo { dev: 0 };
         };
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
 
         // TODO: handle errors for the following syscall
         unsafe {libc::fstat(fd, &mut stat)};
         unsafe {libc::close(fd)};
-        RawBio {
+        RawBlkIo {
             dev: stat.st_dev as u32,
         }
     }
@@ -85,7 +85,7 @@ impl Into<RawBio> for Bio {
 #[serde(tag = "matcher", rename_all = "snake_case")]
 pub enum Matcher {
     FsSyscall(FsSyscall),
-    Bio(Bio),
+    BlkIo(BlkIo),
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
