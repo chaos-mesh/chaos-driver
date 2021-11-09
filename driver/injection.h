@@ -11,7 +11,7 @@ int recover(unsigned long id);
 enum matcher_type
 {
     MATCHER_TYPE_FS_SYSCALL = 0,
-    MATCHER_TYPE_BIO = 1,
+    MATCHER_TYPE_BLK_IO = 1,
 };
 
 #endif

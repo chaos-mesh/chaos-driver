@@ -311,11 +311,11 @@ void injector_delay(void *args, struct pt_regs *regs, long ret)
 }
 
 int should_inject_file(int fd, struct fs_injection_executor_node *e) {
+    int should_inject = 0;
+    long target_ino = 0;
     // TODO: not only verify the inode, we should also verify the mount
     struct file *opened_file = files_lookup_fd(current->files, fd);
 
-    int should_inject = 0;
-    long target_ino = 0;
 
     if (opened_file == NULL) {
         // if the user passed wrong fd and we cannot find the file,

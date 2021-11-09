@@ -57,7 +57,7 @@ long inject(struct chaos_injection *injection, unsigned long *id_out)
 
         write_unlock(&injection_list_lock);
         break;
-    case MATCHER_TYPE_BIO:
+    case MATCHER_TYPE_BLK_IO:
         ret = build_blk_io_injection(id, injection);
         if (ret != 0)
         {

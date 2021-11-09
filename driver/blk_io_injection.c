@@ -1,6 +1,5 @@
 #include <linux/errno.h>
 #include <linux/types.h>
-#include <linux/bio.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/kprobes.h>
@@ -9,6 +8,7 @@
 #include "config.h"
 #include "blk_io_injection.h"
 #include "protocol.h"
+#include "comp.h"
 
 struct blk_io_injection
 {
@@ -118,7 +118,7 @@ int blk_io_injection_executor_add(struct blk_io_injection_executor_node executor
     int ret = 0;
     struct blk_io_injection_executor_node *node;
 
-    pr_info("adding bio injection(%d)\n", executor.id);
+    pr_info("adding blk io injection(%d)\n", executor.id);
 
     write_lock(&blk_io_injection_executor_list_lock);
 
@@ -229,7 +229,7 @@ int blk_io_complete_probe(struct kprobe *p, struct pt_regs *regs)
 
     list_for_each_entry(e, &blk_io_injection_executor_list, list)
     {
-        req = (struct request*)regs_get_kernel_argument(regs, 0);
+        req = (struct request*)compat_regs_get_kernel_argument(regs, 0);
 
         if (e->injection.dev != 0 && (req->bio != NULL && req->bio->bi_bdev != NULL && req->bio->bi_bdev->bd_dev != e->injection.dev)) {
             continue;
