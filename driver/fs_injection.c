@@ -307,7 +307,7 @@ void fs_injection_executor(void *_, struct pt_regs *regs, long ret)
 void injector_delay(void *args, struct pt_regs *regs, long ret)
 {
     struct fs_injector_delay_args *delay_args = args;
-    mdelay(delay_args->delay);
+    udelay(delay_args->delay);
 }
 
 int should_inject_file(int fd, struct fs_injection_executor_node *e) {

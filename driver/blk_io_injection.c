@@ -217,7 +217,7 @@ int blk_io_injection_executor_free_all(void)
 void blk_io_injector_delay(void *args)
 {
     struct blk_io_injector_delay_args *delay_args = args;
-    mdelay(delay_args->delay);
+    udelay(delay_args->delay);
 }
 
 int blk_io_complete_probe(struct kprobe *p, struct pt_regs *regs)

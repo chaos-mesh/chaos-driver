@@ -56,5 +56,5 @@ As the delete injection only passes the id, the third argument of `ioctl` is jus
 1. There are a lot of lists. However, some of them should use a hash table.
 2. Some `RwLock` can turn to use RCU.
 3. The `bio` tracepoint may be not a good place to inject latency. Please use kprobe of `blk_io_start` to inject latency.
-4. In some of the context, we could use `msleep` rather than `mdelay`, as the
+4. In some of the context, we could use `usleep` rather than `udelay`, as the
    former one could be non-busy and other process can run at the same time (more like an IO).
