@@ -12,6 +12,7 @@
 #include "syscall_tracepoint.h"
 #include "protocol.h"
 #include "comp.h"
+#include "lazy_list.h"
 
 struct fs_syscall_injection
 {
@@ -44,11 +45,14 @@ void fs_injection_executor(void *_, struct pt_regs *regs, long ret);
 
 void injector_delay(void *args, struct pt_regs *regs, long ret);
 
-int register_syscall_tracepoint_executor(void);
-
 int fs_injection_executor_add(struct fs_injection_executor_node executor);
 
 int should_inject_file(int fd, struct fs_injection_executor_node *e);
+
+int register_fs_syscall_tracepoint_executor(struct lazy_list* l);
+int unregister_fs_syscall_tracepoint_executor(struct lazy_list* l);
+
+LAZY_LIST_DEFINE(fs_injection_list, register_fs_syscall_tracepoint_executor, unregister_fs_syscall_tracepoint_executor);
 
 long build_fs_syscall_injection(unsigned long id, struct chaos_injection *injection_request)
 {
@@ -115,22 +119,28 @@ free_arg:
     return ret;
 }
 
-static LIST_HEAD(fs_injection_executor_list);
-static DEFINE_RWLOCK(fs_injection_executor_list_lock);
-
-// This variable is protected by the `fs_injection_executor_list_lock`
-__u32 executor_added = 0;
-int register_syscall_tracepoint_executor(void)
+int register_fs_syscall_tracepoint_executor(struct lazy_list* l)
 {
-    struct tracepoint_executor executor;
-    executor.id = EXECUTOR_ID_FS_INJECTION;
-    executor.context = NULL;
-    executor.executor = fs_injection_executor;
-    syscall_tracepoint_executor_add(executor);
+    int ret = 0;
+    struct tracepoint_executor executor = {
+        .id = EXECUTOR_ID_FS_INJECTION,
+        .context = NULL,
+        .executor = fs_injection_executor,
+    };
 
-    executor_added = 1;
+    ret = syscall_tracepoint_executor_add(executor);
+    if (ret != 0)
+    {
+        goto error;
+    }
 
-    return 0;
+error:
+    return ret;
+}
+
+int unregister_fs_syscall_tracepoint_executor(struct lazy_list* l)
+{
+    return syscall_tracepoint_executor_del(EXECUTOR_ID_FS_INJECTION);
 }
 
 int fs_injection_executor_add(struct fs_injection_executor_node executor)
@@ -138,40 +148,25 @@ int fs_injection_executor_add(struct fs_injection_executor_node executor)
     int ret = 0;
     struct fs_injection_executor_node *node;
 
-    pr_info("adding fs injection(%d)\n", executor.id);
-
-    write_lock(&fs_injection_executor_list_lock);
-
-    // lazily create the list and register tracepoint
-    if (executor_added == 0)
-    {
-        ret = register_syscall_tracepoint_executor();
-        if (ret != 0)
-        {
-            pr_err(MODULE_NAME ": err(%d), fail to register tracepoint\n", ret);
-            goto release;
-        }
-    }
-
     // allocate the executors node and add it to the existing link list
     node = kmalloc(sizeof(struct fs_injection_executor_node), GFP_KERNEL);
     if (node == NULL)
     {
-        ret = ENOMEM;
-        goto release;
+        return ENOMEM;
     }
-    *node = executor;
     INIT_LIST_HEAD(&node->list);
+    *node = executor;
 
-    list_add_tail(&node->list, &fs_injection_executor_list);
+    ret = lazy_list_add_tail(&node->list, &fs_injection_list);
+    if (ret != 0) 
+    {
+        kfree(node);
+    }
 
-    pr_info("executor(%d) added\n", executor.id);
-release:
-    write_unlock(&fs_injection_executor_list_lock);
     return ret;
 }
 
-void fs_free_node(struct fs_injection_executor_node *e)
+void fs_injection_node_drop(struct fs_injection_executor_node *e)
 {
     if (e->injection.injector_args != NULL)
     {
@@ -190,31 +185,8 @@ int fs_injection_executor_del(unsigned long id)
     struct fs_injection_executor_node *e;
     struct fs_injection_executor_node *tmp;
 
-    write_lock(&fs_injection_executor_list_lock);
+    lazy_list_delete(&fs_injection_list, e, tmp, e->id == id, fs_injection_node_drop(e), list);
 
-    list_for_each_entry_safe(e, tmp, &fs_injection_executor_list, list)
-    {
-        if (e->id == id)
-        {
-            list_del(&e->list);
-            fs_free_node(e);
-            goto release;
-        }
-    }
-
-    ret = ENOENT;
-
-release:
-    if (ret == 0 && list_empty(&fs_injection_executor_list) && executor_added)
-    {
-        ret = syscall_tracepoint_executor_del(EXECUTOR_ID_FS_INJECTION);
-        if (ret == 0)
-        {
-            executor_added = 0;
-        }
-    }
-
-    write_unlock(&fs_injection_executor_list_lock);
     return ret;
 }
 
@@ -224,31 +196,12 @@ int fs_injection_executor_free_all(void)
     struct fs_injection_executor_node *e;
     struct fs_injection_executor_node *tmp;
 
-    write_lock(&fs_injection_executor_list_lock);
+    lazy_list_delete_all(&fs_injection_list, e, tmp, fs_injection_node_drop(e), list);
 
-    list_for_each_entry_safe(e, tmp, &fs_injection_executor_list, list)
-    {
-        list_del(&e->list);
-        kfree(e);
-    }
-
-    // if the tracepoint is not empty, it should be unregistered.
-    if (executor_added)
-    {
-        ret = syscall_tracepoint_executor_del(EXECUTOR_ID_FS_INJECTION);
-        if (ret == 0)
-        {
-            executor_added = 0;
-        }
-    }
-
-    write_unlock(&fs_injection_executor_list_lock);
     return ret;
 }
 
-void fs_injection_executor(void *_, struct pt_regs *regs, long ret)
-{
-    struct fs_injection_executor_node *e;
+inline void fs_injection_execute(struct fs_injection_executor_node* e, struct pt_regs *regs, long ret) {
     unsigned long id = syscall_get_nr(current, regs);
     int fd = 0;
 
@@ -259,49 +212,49 @@ void fs_injection_executor(void *_, struct pt_regs *regs, long ret)
         id == __NR_sendfile || 
         id == __NR_fstat))
     {
-        read_lock(&fs_injection_executor_list_lock);
+        int inject_times = 0;
 
-        list_for_each_entry(e, &fs_injection_executor_list, list)
+        if (e->injection.syscall != 0 && e->injection.syscall != id)
         {
-            int inject_times = 0;
+            return;
+        }
 
-            if (e->injection.syscall != 0 && e->injection.syscall != id)
-            {
-                continue;
+        if (e->injection.pid != 0 && e->injection.pid != current->pid)
+        {
+            return;
+        }
+
+        if (e->injection.folder != NULL) {
+            if (id == __NR_openat || id == __NR_open) {
+                fd = ret;
+            } else {
+                fd = (int)regs->di;
             }
 
-            if (e->injection.pid != 0 && e->injection.pid != current->pid)
-            {
-                continue;
+            if (should_inject_file(fd, e)) {
+                inject_times += 1;
             }
 
-            if (e->injection.folder != NULL) {
-                if (id == __NR_openat || id == __NR_open) {
-                    fd = ret;
-                } else {
-                    fd = (int)regs->di;
-                }
-
+            if (id == __NR_sendfile) {
+                // The second argument of sendfile should also be verified
+                fd = (int)regs->si;
                 if (should_inject_file(fd, e)) {
                     inject_times += 1;
                 }
-
-                if (id == __NR_sendfile) {
-                    // The second argument of sendfile should also be verified
-                    fd = (int)regs->si;
-                    if (should_inject_file(fd, e)) {
-                        inject_times += 1;
-                    }
-                }
-            }
-
-            while(inject_times--) {
-                e->injection.injector(e->injection.injector_args, regs, ret);
             }
         }
 
-        read_unlock(&fs_injection_executor_list_lock);
+        while(inject_times--) {
+            e->injection.injector(e->injection.injector_args, regs, ret);
+        }
     }
+}
+
+void fs_injection_executor(void *_, struct pt_regs *regs, long ret)
+{
+    struct fs_injection_executor_node *e;
+
+    lazy_list_for_each_entry(&fs_injection_list, e, fs_injection_execute(e, regs, ret), list);
 }
 
 void injector_delay(void *args, struct pt_regs *regs, long ret)

@@ -9,6 +9,7 @@
 #include "blk_io_injection.h"
 #include "protocol.h"
 #include "comp.h"
+#include "lazy_list.h"
 
 struct blk_io_injection
 {
@@ -34,7 +35,10 @@ struct blk_io_injector_delay_args {
 
 int blk_io_complete_probe(struct kprobe *p, struct pt_regs *regs);
 
-int register_blk_io_kprobe(void);
+int blk_io_register_kprobe(struct lazy_list* l);
+int blk_io_unregister_kprobe(struct lazy_list* l);
+
+LAZY_LIST_DEFINE(blk_io_injection_list, blk_io_register_kprobe, blk_io_unregister_kprobe);
 
 int blk_io_injection_executor_add(struct blk_io_injection_executor_node executor);
 
@@ -89,18 +93,12 @@ free_arg:
     return ret;
 }
 
-static LIST_HEAD(blk_io_injection_executor_list);
-static DEFINE_RWLOCK(blk_io_injection_executor_list_lock);
-
-// This variable is protected by the `blk_io_injection_executor_list_lock`
-__u32 blk_io_kprobe_registered = 0;
-
 static struct kprobe blk_io_kprobe = {
     .symbol_name = "blk_account_io_start",
     .pre_handler = blk_io_complete_probe,
 };
 
-int register_blk_io_kprobe(void)
+int blk_io_register_kprobe(struct lazy_list* l)
 {
     int ret = 0;
 
@@ -109,7 +107,13 @@ int register_blk_io_kprobe(void)
         return ret;
     }
 
-    blk_io_kprobe_registered = 1;
+    return 0;
+}
+
+int blk_io_unregister_kprobe(struct lazy_list* l)
+{
+    unregister_kprobe(&blk_io_kprobe);
+
     return 0;
 }
 
@@ -118,36 +122,21 @@ int blk_io_injection_executor_add(struct blk_io_injection_executor_node executor
     int ret = 0;
     struct blk_io_injection_executor_node *node;
 
-    pr_info("adding blk io injection(%d)\n", executor.id);
-
-    write_lock(&blk_io_injection_executor_list_lock);
-
-    // lazily create the list and register kprobe
-    if (blk_io_kprobe_registered == 0)
-    {
-        ret = register_blk_io_kprobe();
-        if (ret != 0)
-        {
-            pr_err(MODULE_NAME ": err(%d), fail to register kprobe\n", ret);
-            goto release;
-        }
-    }
-
     // allocate the executors node and add it to the existing link list
     node = kmalloc(sizeof(struct blk_io_injection_executor_node), GFP_KERNEL);
     if (node == NULL)
     {
-        ret = ENOMEM;
-        goto release;
+        return ENOMEM;
     }
     *node = executor;
     INIT_LIST_HEAD(&node->list);
 
-    list_add_tail(&node->list, &blk_io_injection_executor_list);
+    ret = lazy_list_add_tail(&node->list, &blk_io_injection_list);
+    if (ret != 0) 
+    {
+        kfree(node);
+    }
 
-    pr_info("executor(%d) added\n", executor.id);
-release:
-    write_unlock(&blk_io_injection_executor_list_lock);
     return ret;
 }
 
@@ -162,31 +151,12 @@ void blk_io_free_node(struct blk_io_injection_executor_node *e)
 
 int blk_io_injection_executor_del(unsigned long id)
 {
-    int ret = 0;
+     int ret = 0;
     struct blk_io_injection_executor_node *e;
     struct blk_io_injection_executor_node *tmp;
 
-    write_lock(&blk_io_injection_executor_list_lock);
+    lazy_list_delete(&blk_io_injection_list, e, tmp, e->id == id, blk_io_free_node(e), list);
 
-    list_for_each_entry_safe(e, tmp, &blk_io_injection_executor_list, list)
-    {
-        if (e->id == id)
-        {
-            list_del(&e->list);
-            blk_io_free_node(e);
-            goto release;
-        }
-    }
-
-    ret = ENOENT;
-
-release:
-    if (ret == 0 && list_empty(&blk_io_injection_executor_list) && blk_io_kprobe_registered)
-    {
-        unregister_kprobe(&blk_io_kprobe);
-    }
-
-    write_unlock(&blk_io_injection_executor_list_lock);
     return ret;
 }
 
@@ -196,21 +166,8 @@ int blk_io_injection_executor_free_all(void)
     struct blk_io_injection_executor_node *e;
     struct blk_io_injection_executor_node *tmp;
 
-    write_lock(&blk_io_injection_executor_list_lock);
+    lazy_list_delete_all(&blk_io_injection_list, e, tmp, blk_io_free_node(e), list);
 
-    list_for_each_entry_safe(e, tmp, &blk_io_injection_executor_list, list)
-    {
-        list_del(&e->list);
-        kfree(e);
-    }
-
-    // if the kprobe is not empty, it should be unregistered.
-    if (blk_io_kprobe_registered)
-    {
-        unregister_kprobe(&blk_io_kprobe);
-    }
-
-    write_unlock(&blk_io_injection_executor_list_lock);
     return ret;
 }
 
@@ -220,25 +177,23 @@ void blk_io_injector_delay(void *args)
     udelay(delay_args->delay);
 }
 
+inline void blk_io_inject(struct blk_io_injection_executor_node *e, struct pt_regs *regs)
+{
+    struct request* req;
+    req = (struct request*)compat_regs_get_kernel_argument(regs, 0);
+
+    if (e->injection.dev != 0 && (req->bio != NULL && req->bio->bi_bdev != NULL && req->bio->bi_bdev->bd_dev != e->injection.dev)) {
+        return;
+    }
+
+    e->injection.injector(e->injection.injector_args);
+}
+
 int blk_io_complete_probe(struct kprobe *p, struct pt_regs *regs)
 {
     struct blk_io_injection_executor_node *e;
-    struct request* req;
 
-    read_lock(&blk_io_injection_executor_list_lock);
-
-    list_for_each_entry(e, &blk_io_injection_executor_list, list)
-    {
-        req = (struct request*)compat_regs_get_kernel_argument(regs, 0);
-
-        if (e->injection.dev != 0 && (req->bio != NULL && req->bio->bi_bdev != NULL && req->bio->bi_bdev->bd_dev != e->injection.dev)) {
-            continue;
-        }
-
-        e->injection.injector(e->injection.injector_args);
-    }
-
-    read_unlock(&blk_io_injection_executor_list_lock);
+    lazy_list_for_each_entry(&blk_io_injection_list, e, blk_io_inject(e, regs), list);
 
     return 0;
 }

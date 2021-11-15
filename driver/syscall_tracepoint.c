@@ -5,8 +5,13 @@
 #include "config.h"
 #include "syscall_tracepoint.h"
 #include "comp.h"
+#include "lazy_list.h"
 
-__u32 sys_exit_tracepoint_registered = 0;
+int register_syscall_tracepoint(struct lazy_list* l);
+int unregister_syscall_tracepoint(struct lazy_list* l);
+
+LAZY_LIST_DEFINE(syscall_tracepoint_list, register_syscall_tracepoint, unregister_syscall_tracepoint);
+
 struct tracepoint *tp_sys_exit;
 
 void syscall_visit_tracepoint(struct tracepoint *tp, void *priv)
@@ -18,7 +23,7 @@ void syscall_visit_tracepoint(struct tracepoint *tp, void *priv)
 }
 
 TRACEPOINT_PROBE(syscall_exit_probe, struct pt_regs *regs, long ret);
-int register_syscall_tracepoint(void)
+int register_syscall_tracepoint(struct lazy_list* l)
 {
     int ret = 0;
 
@@ -34,13 +39,27 @@ int register_syscall_tracepoint(void)
 
         pr_info(MODULE_NAME ": tracepoint registered");
         // the tracepoint has been registered successfully
-        sys_exit_tracepoint_registered = 1;
+        l->registered = 1;
         return 0;
     }
 
     // fail to find the sys_exit tracepoint
     return ENOENT;
 }
+
+int unregister_syscall_tracepoint(struct lazy_list* l)
+{
+    int ret = 0;
+
+    ret = compat_unregister_trace(syscall_exit_probe, "sys_exit", tp_sys_exit);
+    if (ret != 0) {
+        return ret;
+    }
+
+    l->registered = 0;
+    return ret;
+}
+
 struct executor_list_node
 {
     struct tracepoint_executor executor;
@@ -48,42 +67,35 @@ struct executor_list_node
     struct list_head list;
 };
 
-static LIST_HEAD(syscall_tracepoint_executor_list);
-static DEFINE_RWLOCK(syscall_tracepoint_executor_list_lock);
-
 int syscall_tracepoint_executor_add(struct tracepoint_executor executor)
 {
     int ret = 0;
     struct executor_list_node *node;
 
-    write_lock(&syscall_tracepoint_executor_list_lock);
-
-    // lazily create the list and register tracepoint
-    if (sys_exit_tracepoint_registered == 0)
-    {
-        ret = register_syscall_tracepoint();
-        if (ret != 0)
-        {
-            pr_err(MODULE_NAME ": err(%d), fail to register tracepoint\n", ret);
-            goto release;
-        }
-    }
-
-    // allocate the executors node and add it to the existing link list
     node = kmalloc(sizeof(struct executor_list_node), GFP_KERNEL);
     if (node == NULL)
     {
-        ret = ENOMEM;
-        goto release;
+        return ENOMEM;
     }
+    
     INIT_LIST_HEAD(&node->list);
     node->executor = executor;
 
-    list_add_tail(&node->list, &syscall_tracepoint_executor_list);
+    ret = lazy_list_add_tail(&node->list, &syscall_tracepoint_list);
+    if (ret != 0) 
+    {
+        kfree(node);
+    }
 
-release:
-    write_unlock(&syscall_tracepoint_executor_list_lock);
     return ret;
+}
+
+inline void syscall_tracepoint_executor_node_drop(struct executor_list_node *e) {
+    if (e->executor.context != NULL)
+    {
+        kfree(e->executor.context);
+    }
+    kfree(e);
 }
 
 int syscall_tracepoint_executor_del(__u32 id)
@@ -92,31 +104,8 @@ int syscall_tracepoint_executor_del(__u32 id)
     struct executor_list_node *e;
     struct executor_list_node *tmp;
 
-    write_lock(&syscall_tracepoint_executor_list_lock);
+    lazy_list_delete(&syscall_tracepoint_list, e, tmp, e->executor.id == id, syscall_tracepoint_executor_node_drop(e), list);
 
-    list_for_each_entry_safe(e, tmp, &syscall_tracepoint_executor_list, list)
-    {
-        if (e->executor.id == id)
-        {
-            list_del(&e->list);
-            if (e->executor.context != NULL)
-            {
-                kfree(e->executor.context);
-            }
-            kfree(e);
-            goto release;
-        }
-    }
-
-    ret = ENOENT;
-
-release:
-    if (ret == 0 && list_empty(&syscall_tracepoint_executor_list) && sys_exit_tracepoint_registered)
-    {
-        compat_unregister_trace(syscall_exit_probe, "sys_exit", tp_sys_exit);
-    }
-
-    write_unlock(&syscall_tracepoint_executor_list_lock);
     return ret;
 }
 
@@ -126,25 +115,8 @@ int syscall_tracepoint_executor_free_all(void)
     struct executor_list_node *e;
     struct executor_list_node *tmp;
 
-    write_lock(&syscall_tracepoint_executor_list_lock);
+    lazy_list_delete_all(&syscall_tracepoint_list, e, tmp, syscall_tracepoint_executor_node_drop(e), list);
 
-    list_for_each_entry_safe(e, tmp, &syscall_tracepoint_executor_list, list)
-    {
-        list_del(&e->list);
-        if (e->executor.context != NULL)
-        {
-            kfree(e->executor.context);
-        }
-        kfree(e);
-    }
-
-    // if the tracepoint is not empty, it should be unregistered.
-    if (sys_exit_tracepoint_registered)
-    {
-        compat_unregister_trace(syscall_exit_probe, "sys_exit", tp_sys_exit);
-    }
-
-    write_unlock(&syscall_tracepoint_executor_list_lock);
     return ret;
 }
 
@@ -152,12 +124,5 @@ TRACEPOINT_PROBE(syscall_exit_probe, struct pt_regs *regs, long ret)
 {
     struct executor_list_node *e;
 
-    read_lock(&syscall_tracepoint_executor_list_lock);
-
-    list_for_each_entry(e, &syscall_tracepoint_executor_list, list)
-    {
-        e->executor.executor(e->executor.context, regs, ret);
-    }
-
-    read_unlock(&syscall_tracepoint_executor_list_lock);
+    lazy_list_for_each_entry(&syscall_tracepoint_list, e,e->executor.executor(e->executor.context, regs, ret), list);
 }
