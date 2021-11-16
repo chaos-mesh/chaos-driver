@@ -60,8 +60,8 @@ impl Client {
                 match injection.injector {
                     Injector::Delay(delay) => {
                         let injector_type = INJECTOR_TYPE_DELAY;
-                        let injector_arg = &delay.into() as *const RawDelay as *const c_void;
-                        let injector_arg_size = std::mem::size_of::<RawDelay>();
+                        let injector_arg = &delay as *const Delay as *const c_void;
+                        let injector_arg_size = std::mem::size_of::<Delay>();
 
                         let raw_injection = ChaosInjection {
                             matcher_type,
@@ -85,8 +85,8 @@ impl Client {
                 match injection.injector {
                     Injector::Delay(delay) => {
                         let injector_type = INJECTOR_TYPE_DELAY;
-                        let injector_arg = &delay.into() as *const RawDelay as *const c_void;
-                        let injector_arg_size = std::mem::size_of::<RawDelay>();
+                        let injector_arg = &delay as *const Delay as *const c_void;
+                        let injector_arg_size = std::mem::size_of::<Delay>();
 
                         let raw_injection = ChaosInjection {
                             matcher_type,

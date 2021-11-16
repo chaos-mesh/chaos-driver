@@ -1,4 +1,4 @@
-use std::{convert::TryInto, ffi::CString, time::Duration};
+use std::ffi::CString;
 
 use nix::NixPath;
 use serde::{Deserialize, Serialize};
@@ -89,21 +89,9 @@ pub enum Matcher {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
-pub struct Delay {
-    delay: Duration,
-}
-
 #[repr(C, packed)]
-pub struct RawDelay {
+pub struct Delay {
     delay: u64,
-}
-
-impl Into<RawDelay> for Delay {
-    fn into(self) -> RawDelay {
-        RawDelay {
-            delay: self.delay.as_micros().try_into().unwrap(),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
