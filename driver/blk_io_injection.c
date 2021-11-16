@@ -33,7 +33,7 @@ struct blk_io_injector_delay_args {
     __u64 delay;
 }__attribute__((packed));
 
-int blk_io_complete_probe(struct kprobe *p, struct pt_regs *regs);
+int blk_io_start_probe(struct kprobe *p, struct pt_regs *regs);
 
 int blk_io_register_kprobe(struct lazy_list* l);
 int blk_io_unregister_kprobe(struct lazy_list* l);
@@ -95,7 +95,7 @@ free_arg:
 
 static struct kprobe blk_io_kprobe = {
     .symbol_name = "blk_account_io_start",
-    .pre_handler = blk_io_complete_probe,
+    .pre_handler = blk_io_start_probe,
 };
 
 int blk_io_register_kprobe(struct lazy_list* l)
@@ -189,7 +189,7 @@ inline void blk_io_inject(struct blk_io_injection_executor_node *e, struct pt_re
     e->injection.injector(e->injection.injector_args);
 }
 
-int blk_io_complete_probe(struct kprobe *p, struct pt_regs *regs)
+int blk_io_start_probe(struct kprobe *p, struct pt_regs *regs)
 {
     struct blk_io_injection_executor_node *e;
 
