@@ -23,7 +23,7 @@
 
 #include "config.h"
 #include "chaos_device.h"
-#include "syscall_tracepoint.h"
+#include "injection.h"
 
 static int __init chaos_main(void)
 {
@@ -44,9 +44,14 @@ err:
 }
 static void __exit chaos_exit(void)
 {
+    int ret = 0;
     pr_info(MODULE_NAME " is unloading \n");
 
-    syscall_tracepoint_executor_free_all();
+    ret = recover_all();
+    if (ret != 0)
+    {
+        pr_err(MODULE_NAME ": fail to recover all injection\n");
+    }
     unregister_chaos_device();
 }
 

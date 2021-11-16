@@ -111,7 +111,27 @@ int recover(unsigned long id)
 
     write_unlock(&injection_list_lock);
 
-    pr_info("injection(%lu) recovered\n", id);
+    return ret;
+}
+
+int recover_all()
+{
+    struct injection_node *node, *tmp;
+    int ret = 0;
+
+    write_lock(&injection_list_lock);
+
+    list_for_each_entry_safe(node, tmp, &injection_list, list)
+    {
+        ret = node->del(node->id);
+        // only delete the node when it's recovered successfully
+        if (ret == 0)
+        {
+            list_del(&node->list);
+        }
+    }
+
+    write_unlock(&injection_list_lock);
 
     return ret;
 }

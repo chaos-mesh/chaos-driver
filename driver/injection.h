@@ -7,6 +7,7 @@ unsigned long get_id(void);
 
 long inject(struct chaos_injection *injection, unsigned long *id);
 int recover(unsigned long id);
+int recover_all(void);
 
 enum matcher_type
 {
