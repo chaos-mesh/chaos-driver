@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/chaos-mesh/chaos-driver/buildkit/build"
 	"github.com/spf13/cobra"
@@ -63,7 +64,7 @@ func initConfig() {
 		utsname := unix.Utsname{}
 		unix.Uname(&utsname)
 
-		kernelVersion = string(utsname.Release[:])
+		kernelVersion = strings.TrimRight(string(utsname.Release[:]), "\x00")
 	}
 
 	if buildDir == "" {
