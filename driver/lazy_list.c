@@ -13,6 +13,8 @@ int lazy_list_add_tail(struct list_head* head, struct lazy_list* l) {
         {
             goto release;
         }
+
+        l->registered = 1;
     }
 
     list_add_tail(head, &l->head);
