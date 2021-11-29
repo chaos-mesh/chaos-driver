@@ -22,7 +22,7 @@
 #endif
 
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0))
 
 #define files_lookup_fd(FILES, FD) \
     fcheck_files(FILES, FD);\
