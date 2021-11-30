@@ -38,26 +38,22 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
 
 struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
 {
+	struct request *rq = NULL;
     struct request_queue *q = hctx->queue;
     struct ioem_data *data = q->elevator->elevator_data;
 
     spin_lock(&data->lock);
     if (!list_empty(&data->only_list)) {
-        struct request *rq;
-
         rq = list_first_entry(&data->only_list, struct request, queuelist);
         list_del_init(&rq->queuelist);
 
         #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
         atomic_dec(&hctx->elevator_queued);
         #endif
-
-        return rq;
-
     }
     spin_unlock(&data->lock);
 
-    return NULL;
+    return rq;
 }
 
 static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head * list, bool at_head) 
@@ -81,11 +77,25 @@ static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head *
     spin_unlock(&data->lock);
 }
 
+static bool has_work(struct blk_mq_hw_ctx * hctx)
+{
+    struct request_queue *q = hctx->queue;
+    struct ioem_data *data = q->elevator->elevator_data;
+	bool has_work = 0;
+
+	spin_lock(&data->lock);
+	has_work = !list_empty(&data->only_list);
+	spin_unlock(&data->lock);
+
+	return has_work;
+}
+
 static struct elevator_type ioem = {
     .ops = {
         .init_sched = ioem_init_sched,
         .insert_requests = ioem_insert_requests,
         .dispatch_request = ioem_dispatch_request,
+		.has_work = has_work,
     },
     .elevator_name = "ioem",
     .elevator_owner = THIS_MODULE,
