@@ -4,6 +4,7 @@
 #include <linux/spinlock.h>
 #include <linux/version.h>
 #include <linux/rbtree.h>
+#include <linux/hrtimer.h>
 
 #include "ioem.h"
 
@@ -20,11 +21,26 @@ struct ioem_priv* ioem_priv(struct request *rq)
     return (struct ioem_priv*)(&rq->elv.priv[0]);
 }
 
+struct ioem_hctx_data {
+    struct hrtimer timer;
+    struct blk_mq_hw_ctx* hctx;
+};
+
 struct ioem_data {
     struct rb_root root;
 
     spinlock_t lock;
 };
+
+static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
+{
+    struct ioem_hctx_data* ihd = container_of(timer, struct ioem_hctx_data,
+						 timer);
+
+    blk_mq_run_hw_queue(ihd->hctx, 1);
+
+    return HRTIMER_NORESTART;
+}
 
 static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
 {
@@ -47,6 +63,22 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
 
     q->elevator = eq;
 
+    return 0;
+}
+
+static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+{
+    struct ioem_hctx_data *ihd;
+
+    ihd = kmalloc_node(sizeof(*ihd), GFP_KERNEL, hctx->numa_node);
+    if (!ihd)
+		return -ENOMEM;
+    
+    hrtimer_init(&ihd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
+    ihd->timer.function = ioem_timer;
+    ihd->hctx = hctx;
+
+    hctx->sched_data = ihd;
     return 0;
 }
 
@@ -84,14 +116,24 @@ static void ioem_erase_head(struct ioem_data *data, struct request *rq)
 
 struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
 {
+    struct ioem_hctx_data *ihd = hctx->sched_data;
     struct request *rq = NULL;
     struct request_queue *q = hctx->queue;
     struct ioem_data *data = q->elevator->elevator_data;
 
     spin_lock(&data->lock);
     if (!RB_EMPTY_ROOT(&data->root)) {
+        u64 now;
+
         rq = ioem_peek_request(data);
-        ioem_erase_head(data, rq);
+
+        now = ktime_get_ns();
+        if (ioem_priv(rq)->time_to_send < now) {
+            ioem_erase_head(data, rq);
+        } else {
+            hrtimer_start(&ihd->timer, ioem_priv(rq)->time_to_send, HRTIMER_MODE_ABS_PINNED);
+            rq = NULL;
+        }
 
         #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
         atomic_dec(&hctx->elevator_queued);
@@ -141,6 +183,7 @@ static struct elevator_type ioem = {
     .ops = {
         .init_sched = ioem_init_sched,
         .insert_requests = ioem_insert_requests,
+        .init_hctx = ioem_init_hctx,
         .dispatch_request = ioem_dispatch_request,
         .has_work = has_work,
     },
