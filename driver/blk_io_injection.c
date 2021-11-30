@@ -182,9 +182,11 @@ inline void blk_io_inject(struct blk_io_injection_executor_node *e, struct pt_re
     struct request* req;
     req = (struct request*)compat_regs_get_kernel_argument(regs, 0);
 
+    #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0))
     if (e->injection.dev != 0 && (req->bio != NULL && req->bio->bi_bdev != NULL && req->bio->bi_bdev->bd_dev != e->injection.dev)) {
         return;
     }
+    #endif
 
     e->injection.injector(e->injection.injector_args);
 }

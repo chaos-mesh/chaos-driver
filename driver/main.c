@@ -20,10 +20,12 @@
 
 #include <linux/delay.h>
 #include <linux/fdtable.h>
+#include <linux/elevator.h>
 
 #include "config.h"
 #include "chaos_device.h"
 #include "injection.h"
+#include "ioem.h"
 
 static int __init chaos_main(void)
 {
@@ -39,6 +41,12 @@ static int __init chaos_main(void)
         goto err;
     }
 
+    ret = ioem_register();
+    if (ret < 0)
+    {
+        pr_err(MODULE_NAME ": register_chaos_device failed \n");
+        goto err;
+    }
 err:
     return ret;
 }
@@ -53,6 +61,8 @@ static void __exit chaos_exit(void)
         pr_err(MODULE_NAME ": fail to recover all injection\n");
     }
     unregister_chaos_device();
+
+    ioem_unregister();
 }
 
 module_init(chaos_main);
