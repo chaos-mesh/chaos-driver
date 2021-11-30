@@ -35,7 +35,7 @@ struct ioem_data {
 static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
 {
     struct ioem_hctx_data* ihd = container_of(timer, struct ioem_hctx_data,
-						 timer);
+                         timer);
 
     blk_mq_run_hw_queue(ihd->hctx, 1);
 
@@ -66,13 +66,19 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
     return 0;
 }
 
+static void ioem_exit_sched(struct elevator_queue *e)
+{
+    struct ioem_data *data = e->elevator_data;
+    kfree(data);
+}
+
 static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 {
     struct ioem_hctx_data *ihd;
 
     ihd = kmalloc_node(sizeof(*ihd), GFP_KERNEL, hctx->numa_node);
     if (!ihd)
-		return -ENOMEM;
+        return -ENOMEM;
     
     hrtimer_init(&ihd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
     ihd->timer.function = ioem_timer;
@@ -80,6 +86,14 @@ static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 
     hctx->sched_data = ihd;
     return 0;
+}
+
+static void ioem_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+{
+    struct ioem_hctx_data *ihd = hctx->sched_data;
+
+    hrtimer_cancel(&ihd->timer);
+    kfree(hctx->sched_data);
 }
 
 static void ioem_enqueue(struct ioem_data *data, struct request *rq)
@@ -182,8 +196,11 @@ static bool has_work(struct blk_mq_hw_ctx * hctx)
 static struct elevator_type ioem = {
     .ops = {
         .init_sched = ioem_init_sched,
-        .insert_requests = ioem_insert_requests,
         .init_hctx = ioem_init_hctx,
+        .exit_sched = ioem_exit_sched,
+        .exit_hctx = ioem_exit_hctx,
+
+        .insert_requests = ioem_insert_requests,
         .dispatch_request = ioem_dispatch_request,
         .has_work = has_work,
     },
