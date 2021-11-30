@@ -2,6 +2,7 @@
 #include <linux/blk-mq.h>
 #include <linux/elevator.h>
 #include <linux/spinlock.h>
+#include <linux/version.h>
 
 #include "ioem.h"
 
@@ -44,7 +45,10 @@ struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
 
 		rq = list_first_entry(&data->only_list, struct request, queuelist);
 		list_del_init(&rq->queuelist);
+
+		#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
 		atomic_dec(&hctx->elevator_queued);
+		#endif
 
         return rq;
 
@@ -67,7 +71,10 @@ static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head *
 		list_del_init(&rq->queuelist);
 
 		list_add_tail(&rq->queuelist, &data->only_list);
+
+		#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
 		atomic_inc(&hctx->elevator_queued);
+		#endif
 	}
 	spin_unlock(&data->lock);
 }
