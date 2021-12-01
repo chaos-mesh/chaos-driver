@@ -14,12 +14,11 @@ struct chaos_injection
 {
     __u32 matcher_type;
     void __user *matcher_arg;
-    size_t matcher_arg_size;
 
     __u32 injector_type;
     void __user *injector_arg;
-    size_t injector_arg_size;
 } __attribute__((packed));
+
 #define ADD_INJECTION_NR 1
 #define ADD_INJECTION _IOW(CHAOS_IOCTL_MAGIC, ADD_INJECTION_NR, struct chaos_injection)
 

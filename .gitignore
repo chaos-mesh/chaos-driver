@@ -26,6 +26,6 @@ modules.builtin
 *.
 *.symvers
 
-/target/**/*
-
 !/buildkit/go.mod
+!go.mod
+/bin

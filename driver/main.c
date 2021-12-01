@@ -69,3 +69,5 @@ module_init(chaos_main);
 module_exit(chaos_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Chaos Mesh Authors");
+MODULE_DESCRIPTION("Injection delay or errors into the system");

@@ -1,15 +1,12 @@
-all: driver/chaos_driver.ko target/release/kchaos
+all: driver/chaos_driver.ko bin/kchaos
 
 driver/chaos_driver.ko:
 	$(MAKE) -C ./driver all
 
-target/debug/kchaos:
-	cargo build --debug
-
-target/release/kchaos:
-	cargo build --release
+bin/kchaos:
+	go build -o ./bin/kchaos ./cmd 
 
 clean:
 	$(MAKE) -C ./driver clean
 
-.PHONY: all driver/chaos_driver.ko target/release/kchaos target/debug/kchaos
+.PHONY: all driver/chaos_driver.ko bin/kchaos

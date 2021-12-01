@@ -5,8 +5,12 @@
 #include <linux/version.h>
 #include <linux/rbtree.h>
 #include <linux/hrtimer.h>
+#include <linux/list.h>
+#include <linux/random.h>
 
 #include "ioem.h"
+
+void ioem_error_injection(struct request* rq);
 
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
@@ -171,6 +175,9 @@ static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head *
         list_del_init(&rq->queuelist);
 
         ioem_priv(rq)->time_to_send = ktime_get_ns();
+
+        ioem_error_injection(rq);
+
         ioem_enqueue(data, rq);
 
         #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
@@ -216,4 +223,158 @@ int ioem_register(void)
 void ioem_unregister(void)
 {
     elv_unregister(&ioem);
+}
+
+struct ioem_injection {
+    unsigned long id;
+
+    struct list_head list;
+
+    struct ioem_matcher_arg arg;
+
+    s64 delay;
+    s64 delay_jitter;
+    struct crndstate {
+        u32 last;
+        u32 rho;
+    } delay_cor;
+};
+
+LIST_HEAD(ioem_injection_list);
+DEFINE_RWLOCK(ioem_injection_list_lock);
+
+int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
+{
+    int ret = 0;
+    struct ioem_injection* ioem_injection;
+    struct ioem_injector_delay_arg delay_arg;
+
+    ioem_injection = kmalloc(sizeof(*ioem_injection), GFP_KERNEL);
+    if (ioem_injection == NULL)
+    {
+        return ENOMEM;
+    }
+
+    ioem_injection->id = id;
+
+    if (copy_from_user(&ioem_injection->arg, injection->matcher_arg, sizeof(&ioem_injection->arg)))
+    {
+        ret = EINVAL;
+        goto free_matcher_arg;
+    }
+
+    ioem_injection->arg.device = new_decode_dev(ioem_injection->arg.device);
+
+    switch (injection->injector_type)
+    {
+    case IOEM_INJECTOR_TYPE_DELAY:
+        if (copy_from_user(&delay_arg, injection->injector_arg, sizeof(delay_arg)))
+        {
+            ret = EINVAL;
+            goto free_matcher_arg;
+        }
+        ioem_injection->delay = delay_arg.delay;
+        ioem_injection->delay_jitter = delay_arg.jitter;
+        ioem_injection->delay_cor.rho = delay_arg.corr;
+
+        break;
+    default:
+        break;
+    }
+
+    write_lock(&ioem_injection_list_lock);
+    list_add(&ioem_injection->list, &ioem_injection_list);
+    write_unlock(&ioem_injection_list_lock);
+
+    return ret;
+
+free_matcher_arg:
+    kfree(ioem_injection);
+
+    return ret;
+}
+
+int ioem_del(unsigned long id) {
+    struct ioem_injection* e, *tmp;
+
+    write_lock(&ioem_injection_list_lock);
+
+    list_for_each_entry_safe(e, tmp, &ioem_injection_list, list)
+    {
+        if ( e->id == id )
+        {
+            list_del(&e->list);
+            kfree(e);
+        }
+    }
+
+    write_unlock(&ioem_injection_list_lock);
+
+    return 0;
+}
+
+static u32 get_crandom(struct crndstate *state)
+{
+	u64 value, rho;
+	unsigned long answer;
+
+	if (!state || state->rho == 0)	/* no correlation */
+		return prandom_u32();
+
+	value = prandom_u32();
+	rho = (u64)state->rho + 1;
+	answer = (value * ((1ull<<32) - rho) + state->last * rho) >> 32;
+	state->last = answer;
+	return answer;
+}
+
+static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
+    u32 rnd;
+
+    if (jitter == 0)
+        return mu;
+    
+    rnd = get_crandom(state);
+
+    return ((rnd % (2 * (u32)jitter)) + mu) - jitter;
+}
+
+void ioem_error_injection(struct request* rq)
+{
+    struct ioem_injection* e;
+
+    read_lock(&ioem_injection_list_lock);
+
+    list_for_each_entry(e, &ioem_injection_list, list)
+    {
+        if (rq->bio == NULL) {
+            continue;
+        }
+
+        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
+        if (e->arg.device != 0 && (rq->bio != NULL && rq->bio->bi_disk != NULL && disk_devt(rq->bio->bi_disk) != e->arg.device)) {
+        #else
+        if (e->arg.device != 0 && (rq->bio->bi_bdev != NULL && rq->bio->bi_bdev->bd_dev != e->arg.device)) {
+        #endif
+            continue;
+        }
+
+        if (e->arg.op) 
+        {
+            unsigned int op = rq->bio->bi_opf & REQ_OP_MASK;
+            if (e->arg.op == 1 && !(op == REQ_OP_WRITE || op == REQ_OP_WRITE_SAME || op == REQ_OP_WRITE_ZEROES))
+            {
+                continue;
+            }
+            if (e->arg.op == 2 && !(op == REQ_OP_READ))
+            {
+                continue;
+            }
+        }
+
+        ioem_priv(rq)->time_to_send =  ktime_get_ns() + ioem_random(e->delay, e->delay_jitter, &e->delay_cor);
+    }
+
+    read_unlock(&ioem_injection_list_lock);
+    return;
 }

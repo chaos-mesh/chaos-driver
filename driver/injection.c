@@ -5,8 +5,7 @@
 #include <linux/slab.h>
 
 #include "injection.h"
-#include "fs_injection.h"
-#include "blk_io_injection.h"
+#include "ioem.h"
 
 static atomic_long_t injection_id = ATOMIC_LONG_INIT(0);
 
@@ -33,8 +32,8 @@ long inject(struct chaos_injection *injection, unsigned long *id_out)
 
     switch (injection->matcher_type)
     {
-    case MATCHER_TYPE_FS_SYSCALL:
-        ret = build_fs_syscall_injection(id, injection);
+    case MATCHER_TYPE_IOEM:
+        ret = build_ioem_injection(id, injection);
         if (ret != 0)
         {
             return ret;
@@ -47,35 +46,11 @@ long inject(struct chaos_injection *injection, unsigned long *id_out)
         if (node == NULL)
         {
             ret = ENOMEM;
-            fs_injection_executor_del(id);
+            ioem_del(id);
             return ret;
         }
         node->id = id;
-        node->del = fs_injection_executor_del;
-        INIT_LIST_HEAD(&node->list);
-        list_add_tail(&node->list, &injection_list);
-
-        write_unlock(&injection_list_lock);
-        break;
-    case MATCHER_TYPE_BLK_IO:
-        ret = build_blk_io_injection(id, injection);
-        if (ret != 0)
-        {
-            return ret;
-        }
-
-        write_lock(&injection_list_lock);
-
-        // allocate the injection node and add it to the existing link list
-        node = kmalloc(sizeof(struct injection_node), GFP_KERNEL);
-        if (node == NULL)
-        {
-            ret = ENOMEM;
-            blk_io_injection_executor_del(id);
-            return ret;
-        }
-        node->id = id;
-        node->del = blk_io_injection_executor_del;
+        node->del = ioem_del;
         INIT_LIST_HEAD(&node->list);
         list_add_tail(&node->list, &injection_list);
 

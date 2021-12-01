@@ -29,11 +29,9 @@ The argument will never be read, so it could be nil. The return value will be an
 struct chaos_injection {
     __u32 matcher_type;
     void* matcher_arg;
-    size_t matcher_arg_size;
     
     __u32 injector_type;
     void* injector_arg;
-    size_t injector_arg_size;
 }
 ```
 
