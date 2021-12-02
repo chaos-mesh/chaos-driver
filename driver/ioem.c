@@ -27,6 +27,9 @@ struct ioem_priv* ioem_priv(struct request *rq)
 }
 
 struct ioem_hctx_data {
+    struct rb_root root;
+    spinlock_t lock;
+
     struct hrtimer timer;
     u64 last_expires;
 
@@ -34,10 +37,6 @@ struct ioem_hctx_data {
 };
 
 struct ioem_data {
-    struct rb_root root;
-
-    spinlock_t lock;
-
     atomic64_t dispatch_count;
     atomic64_t extra_latency;
 };
@@ -68,9 +67,6 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
     }
     eq->elevator_data = data;
 
-    spin_lock_init(&data->lock);
-    data->root = RB_ROOT;
-
     atomic64_set(&data->dispatch_count, 0);
     atomic64_set(&data->extra_latency, 0);
 
@@ -93,8 +89,10 @@ static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
     if (!ihd)
         return -ENOMEM;
     
-    hrtimer_init(&ihd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
+    hrtimer_init(&ihd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 
+    spin_lock_init(&ihd->lock);
+    ihd->root = RB_ROOT;
     ihd->timer.function = ioem_timer;
     ihd->last_expires = 0;
     ihd->hctx = hctx;
@@ -111,7 +109,7 @@ static void ioem_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
     kfree(hctx->sched_data);
 }
 
-static void ioem_enqueue(struct ioem_data *data, struct request *rq)
+static void ioem_enqueue(struct ioem_hctx_data *data, struct request *rq)
 {
     struct rb_node **p = &data->root.rb_node, *parent = NULL;
 
@@ -131,14 +129,14 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
     rb_insert_color(&rq->rb_node, &data->root);
 }
 
-static struct request* ioem_peek_request(struct ioem_data *data)
+static struct request* ioem_peek_request(struct ioem_hctx_data *data)
 {
     struct request* ioem_rq = rq_rb_first(&data->root);
 
     return ioem_rq;
 }
 
-static void ioem_erase_head(struct ioem_data *data, struct request *rq)
+static void ioem_erase_head(struct ioem_hctx_data *data, struct request *rq)
 {
     rb_erase(&rq->rb_node, &data->root);
 }
@@ -150,11 +148,11 @@ struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
     struct request_queue *q = hctx->queue;
     struct ioem_data *data = q->elevator->elevator_data;
 
-    spin_lock(&data->lock);
-    if (!RB_EMPTY_ROOT(&data->root)) {
+    spin_lock(&ihd->lock);
+    if (!RB_EMPTY_ROOT(&ihd->root)) {
         u64 now, time_to_send;
 
-        rq = ioem_peek_request(data);
+        rq = ioem_peek_request(ihd);
 
         now = ktime_get_ns();
         time_to_send = ioem_priv(rq)->time_to_send;
@@ -165,12 +163,12 @@ struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
 
             u64 count = atomic64_read(&data->dispatch_count);
             u64 latency = atomic64_read(&data->extra_latency);
-            if (atomic64_read(&data->dispatch_count) % 10 == 0) {
+            if (count % 10000 == 0) {
                 pr_info("ioem: dispatch_count: %llu, everage extra_latency: %llu\n",
                        count,
                        latency / count);
             }
-            ioem_erase_head(data, rq);
+            ioem_erase_head(ihd, rq);
         } else {
             rq = NULL;
             if (hrtimer_is_queued(&ihd->timer)) {
@@ -180,7 +178,7 @@ struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
             }
 
             ihd->last_expires = time_to_send;
-            hrtimer_start(&ihd->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS_PINNED);
+            hrtimer_start(&ihd->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
         }
     }
 
@@ -191,17 +189,16 @@ tail:
     }
     #endif
 
-    spin_unlock(&data->lock);
+    spin_unlock(&ihd->lock);
 
     return rq;
 }
 
 static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head * list, bool at_head) 
 {
-    struct request_queue *q = hctx->queue;
-    struct ioem_data *data = q->elevator->elevator_data;
+    struct ioem_hctx_data *ihd = hctx->sched_data;
 
-    spin_lock(&data->lock);
+    spin_lock(&ihd->lock);
     while (!list_empty(list)) {
         struct request *rq;
 
@@ -212,22 +209,21 @@ static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head *
 
         ioem_error_injection(rq);
 
-        ioem_enqueue(data, rq);
+        ioem_enqueue(ihd, rq);
 
         #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
         atomic_inc(&hctx->elevator_queued);
         #endif
     }
-    spin_unlock(&data->lock);
+    spin_unlock(&ihd->lock);
 }
 
 static bool has_work(struct blk_mq_hw_ctx * hctx)
 {
-    struct request_queue *q = hctx->queue;
-    struct ioem_data *data = q->elevator->elevator_data;
+    struct ioem_hctx_data *ihd = hctx->sched_data;
     bool has_work = 0;
 
-    has_work = !RB_EMPTY_ROOT(&data->root);
+    has_work = !RB_EMPTY_ROOT(&ihd->root);
 
     return has_work;
 }
