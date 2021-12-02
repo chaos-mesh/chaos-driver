@@ -7,6 +7,7 @@
 #include <linux/hrtimer.h>
 #include <linux/list.h>
 #include <linux/random.h>
+#include <linux/ktime.h>
 
 #include "ioem.h"
 
@@ -27,6 +28,8 @@ struct ioem_priv* ioem_priv(struct request *rq)
 
 struct ioem_hctx_data {
     struct hrtimer timer;
+    u64 last_expires;
+
     struct blk_mq_hw_ctx* hctx;
 };
 
@@ -34,6 +37,9 @@ struct ioem_data {
     struct rb_root root;
 
     spinlock_t lock;
+
+    atomic64_t dispatch_count;
+    atomic64_t extra_latency;
 };
 
 static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
@@ -65,6 +71,9 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
     spin_lock_init(&data->lock);
     data->root = RB_ROOT;
 
+    atomic64_set(&data->dispatch_count, 0);
+    atomic64_set(&data->extra_latency, 0);
+
     q->elevator = eq;
 
     return 0;
@@ -85,7 +94,9 @@ static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
         return -ENOMEM;
     
     hrtimer_init(&ihd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
+
     ihd->timer.function = ioem_timer;
+    ihd->last_expires = 0;
     ihd->hctx = hctx;
 
     hctx->sched_data = ihd;
@@ -141,22 +152,45 @@ struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
 
     spin_lock(&data->lock);
     if (!RB_EMPTY_ROOT(&data->root)) {
-        u64 now;
+        u64 now, time_to_send;
 
         rq = ioem_peek_request(data);
 
         now = ktime_get_ns();
-        if (ioem_priv(rq)->time_to_send < now) {
+        time_to_send = ioem_priv(rq)->time_to_send;
+
+        if (time_to_send <= now) {
+            atomic64_add(1, &data->dispatch_count);
+            atomic64_add(now - time_to_send, &data->extra_latency);
+
+            u64 count = atomic64_read(&data->dispatch_count);
+            u64 latency = atomic64_read(&data->extra_latency);
+            if (atomic64_read(&data->dispatch_count) % 10 == 0) {
+                pr_info("ioem: dispatch_count: %llu, everage extra_latency: %llu\n",
+                       count,
+                       latency / count);
+            }
             ioem_erase_head(data, rq);
         } else {
-            hrtimer_start(&ihd->timer, ioem_priv(rq)->time_to_send, HRTIMER_MODE_ABS_PINNED);
             rq = NULL;
-        }
+            if (hrtimer_is_queued(&ihd->timer)) {
+                if (ihd->last_expires <= time_to_send) {
+                    goto tail;
+                }
+            }
 
-        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
-        atomic_dec(&hctx->elevator_queued);
-        #endif
+            ihd->last_expires = time_to_send;
+            hrtimer_start(&ihd->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS_PINNED);
+        }
     }
+
+tail:
+    #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+    if (rq != NULL) {
+        atomic_dec(&hctx->elevator_queued);
+    }
+    #endif
+
     spin_unlock(&data->lock);
 
     return rq;
@@ -180,7 +214,7 @@ static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head *
 
         ioem_enqueue(data, rq);
 
-        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
+        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
         atomic_inc(&hctx->elevator_queued);
         #endif
     }
@@ -193,9 +227,7 @@ static bool has_work(struct blk_mq_hw_ctx * hctx)
     struct ioem_data *data = q->elevator->elevator_data;
     bool has_work = 0;
 
-    spin_lock(&data->lock);
     has_work = !RB_EMPTY_ROOT(&data->root);
-    spin_unlock(&data->lock);
 
     return has_work;
 }
@@ -353,7 +385,7 @@ void ioem_error_injection(struct request* rq)
             continue;
         }
 
-        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0))
+        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0))
         if (e->arg.device != 0 && (rq->bio != NULL && rq->bio->bi_disk != NULL && disk_devt(rq->bio->bi_disk) != e->arg.device)) {
         #else
         if (e->arg.device != 0 && (rq->bio->bi_bdev != NULL && rq->bio->bi_bdev->bd_dev != e->arg.device)) {
@@ -378,7 +410,7 @@ void ioem_error_injection(struct request* rq)
     }
 
     read_unlock(&ioem_injection_list_lock);
-    
+
     ioem_priv(rq)->time_to_send =  ktime_get_ns() + delay;
     return;
 }
