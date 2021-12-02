@@ -255,6 +255,7 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
         return ENOMEM;
     }
 
+    INIT_LIST_HEAD(&ioem_injection->list);
     ioem_injection->id = id;
 
     if (copy_from_user(&ioem_injection->arg, injection->matcher_arg, sizeof(&ioem_injection->arg)))
@@ -342,6 +343,7 @@ static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
 void ioem_error_injection(struct request* rq)
 {
     struct ioem_injection* e;
+    u64 delay = 0;
 
     read_lock(&ioem_injection_list_lock);
 
@@ -372,9 +374,11 @@ void ioem_error_injection(struct request* rq)
             }
         }
 
-        ioem_priv(rq)->time_to_send =  ktime_get_ns() + ioem_random(e->delay, e->delay_jitter, &e->delay_cor);
+        delay += ioem_random(e->delay, e->delay_jitter, &e->delay_cor);
     }
 
     read_unlock(&ioem_injection_list_lock);
+    
+    ioem_priv(rq)->time_to_send =  ktime_get_ns() + delay;
     return;
 }
