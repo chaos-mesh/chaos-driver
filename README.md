@@ -31,3 +31,19 @@ Then any io request on the `/dev/sda` device will be injected with 100us delay.
 ## Warning
 
 Injecting too much delay on the root device could make your system blocked. Please make sure you have some emergency methods to make the system come back.
+
+## Test ROADMAP
+
+- [x] Linux 5.12
+- [x] Linux 5.4 (Ubuntu 20.04 latest kernel)
+- [ ] Linux 4.19 (Debian Buster)
+- [ ] Linux 4.15 (Ubuntu 18.04)
+- [ ] Linux 3.10 (CentOS 7)
+
+For Linux 3.10, it still needs a lot more other works. Because the `blk` scheduler is much different from the `blk-mq`.
+
+## Integrate ROADMAP
+
+- [x] Provide go package
+- [ ] Integrate with `chaosd`
+- [ ] Integrate with Chaos Mesh
