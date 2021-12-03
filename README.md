@@ -1,26 +1,6 @@
 # Chaos Driver
 
 ## Build
-
-### Through buildkit
-
-The buildkit image is developed to help users to build the chaos driver kernel module automatically.
-
-You could build this image first:
-
-```
-docker build ./buildkit -t chaos-driver-buildkit
-```
-
-Then, you can run this image to build the kernel module:
-
-```
-docker run -it -v $(pwd):/driver chaos-driver-buildkit buildkit --target centos
-```
-
-#### Supported Distributions
-
-- Cent OS
   
 ### Build Manually
 
@@ -34,14 +14,20 @@ After building the kernel module, you could load it by running the following com
 insmod ./driver/chaos_driver.ko
 ```
 
+Change the io scheduler of target device into the `ioem`. For example:
+
+```bash
+echo ioem |sudo tee /sys/block/sda/queue/scheduler
+```
+
 Then, you can use the client to send commands to the kernel module:
 
 ```bash
-./target/release/kchaos inject '{"matcher":"blk_io", "dev": "/dev/sda", "injector": "delay", "delay": 10}'
+./bin/kchaos inject ioem --delay 100000 --op 0 --dev_path /dev/sda
 ```
 
-Then any io operation on the `/dev/sda` device will be injected with 10us delay.
+Then any io request on the `/dev/sda` device will be injected with 100us delay.
 
 ## Warning
 
-All delays are injected with `udelay`, which is backed by a busy loop, so please take care not to inject too long delays, or the system may be stuck and you have to reboot the machine.
+Injecting too much delay on the root device could make your system blocked. Please make sure you have some emergency methods to make the system come back.

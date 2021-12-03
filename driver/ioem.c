@@ -36,11 +36,6 @@ struct ioem_hctx_data {
     struct blk_mq_hw_ctx* hctx;
 };
 
-struct ioem_data {
-    atomic64_t dispatch_count;
-    atomic64_t extra_latency;
-};
-
 static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
 {
     struct ioem_hctx_data* ihd = container_of(timer, struct ioem_hctx_data,
@@ -53,32 +48,16 @@ static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
 
 static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
 {
-    struct ioem_data *data;
     struct elevator_queue *eq;
 
     eq = elevator_alloc(q, e);
     if (!eq)
         return -ENOMEM;
 
-    data = kzalloc_node(sizeof(*data), GFP_KERNEL, q->node);
-    if (!data) {
-        kobject_put(&eq->kobj);
-        return -ENOMEM;
-    }
-    eq->elevator_data = data;
-
-    atomic64_set(&data->dispatch_count, 0);
-    atomic64_set(&data->extra_latency, 0);
 
     q->elevator = eq;
 
     return 0;
-}
-
-static void ioem_exit_sched(struct elevator_queue *e)
-{
-    struct ioem_data *data = e->elevator_data;
-    kfree(data);
 }
 
 static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
@@ -145,8 +124,6 @@ struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
 {
     struct ioem_hctx_data *ihd = hctx->sched_data;
     struct request *rq = NULL;
-    struct request_queue *q = hctx->queue;
-    struct ioem_data *data = q->elevator->elevator_data;
 
     spin_lock(&ihd->lock);
     if (!RB_EMPTY_ROOT(&ihd->root)) {
@@ -158,16 +135,6 @@ struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
         time_to_send = ioem_priv(rq)->time_to_send;
 
         if (time_to_send <= now) {
-            atomic64_add(1, &data->dispatch_count);
-            atomic64_add(now - time_to_send, &data->extra_latency);
-
-            u64 count = atomic64_read(&data->dispatch_count);
-            u64 latency = atomic64_read(&data->extra_latency);
-            if (count % 10000 == 0) {
-                pr_info("ioem: dispatch_count: %llu, everage extra_latency: %llu\n",
-                       count,
-                       latency / count);
-            }
             ioem_erase_head(ihd, rq);
         } else {
             rq = NULL;
@@ -232,7 +199,6 @@ static struct elevator_type ioem = {
     .ops = {
         .init_sched = ioem_init_sched,
         .init_hctx = ioem_init_hctx,
-        .exit_sched = ioem_exit_sched,
         .exit_hctx = ioem_exit_hctx,
 
         .insert_requests = ioem_insert_requests,
