@@ -196,7 +196,12 @@ static bool has_work(struct blk_mq_hw_ctx * hctx)
 }
 
 static struct elevator_type ioem = {
+    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0))
     .ops = {
+    #else
+    .uses_mq = true,
+    .ops.mq = {
+    #endif
         .init_sched = ioem_init_sched,
         .init_hctx = ioem_init_hctx,
         .exit_hctx = ioem_exit_hctx,
