@@ -12,6 +12,7 @@
 #include "ioem.h"
 
 void ioem_error_injection(struct request* rq);
+static enum hrtimer_restart ioem_timer(struct hrtimer * timer);
 
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
@@ -26,69 +27,32 @@ struct ioem_priv* ioem_priv(struct request *rq)
     return (struct ioem_priv*)(&rq->elv.priv[0]);
 }
 
-struct ioem_hctx_data {
+struct ioem_data {
     struct rb_root root;
     spinlock_t lock;
 
     struct hrtimer timer;
     u64 last_expires;
 
+    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
     struct blk_mq_hw_ctx* hctx;
+    #else
+    struct request_queue* q;
+    struct work_struct unplug_work;
+    #endif
 };
 
-static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
+static void ioem_data_init(struct ioem_data* data)
 {
-    struct ioem_hctx_data* ihd = container_of(timer, struct ioem_hctx_data,
-                         timer);
+    hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 
-    blk_mq_run_hw_queue(ihd->hctx, 1);
-
-    return HRTIMER_NORESTART;
+    spin_lock_init(&data->lock);
+    data->root = RB_ROOT;
+    data->timer.function = ioem_timer;
+    data->last_expires = 0;
 }
 
-static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
-{
-    struct elevator_queue *eq;
-
-    eq = elevator_alloc(q, e);
-    if (!eq)
-        return -ENOMEM;
-
-
-    q->elevator = eq;
-
-    return 0;
-}
-
-static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
-{
-    struct ioem_hctx_data *ihd;
-
-    ihd = kmalloc_node(sizeof(*ihd), GFP_KERNEL, hctx->numa_node);
-    if (!ihd)
-        return -ENOMEM;
-    
-    hrtimer_init(&ihd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-
-    spin_lock_init(&ihd->lock);
-    ihd->root = RB_ROOT;
-    ihd->timer.function = ioem_timer;
-    ihd->last_expires = 0;
-    ihd->hctx = hctx;
-
-    hctx->sched_data = ihd;
-    return 0;
-}
-
-static void ioem_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
-{
-    struct ioem_hctx_data *ihd = hctx->sched_data;
-
-    hrtimer_cancel(&ihd->timer);
-    kfree(hctx->sched_data);
-}
-
-static void ioem_enqueue(struct ioem_hctx_data *data, struct request *rq)
+static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 {
     struct rb_node **p = &data->root.rb_node, *parent = NULL;
 
@@ -108,44 +72,94 @@ static void ioem_enqueue(struct ioem_hctx_data *data, struct request *rq)
     rb_insert_color(&rq->rb_node, &data->root);
 }
 
-static struct request* ioem_peek_request(struct ioem_hctx_data *data)
+static void ioem_erase_head(struct ioem_data *data, struct request *rq)
+{
+    rb_erase(&rq->rb_node, &data->root);
+}
+
+static struct request* ioem_peek_request(struct ioem_data *data)
 {
     struct request* ioem_rq = rq_rb_first(&data->root);
 
     return ioem_rq;
 }
 
-static void ioem_erase_head(struct ioem_hctx_data *data, struct request *rq)
+// Though since linux-4.0, blk-mq is merged into the kernel, we still need to
+// wait until linux 4.19 to set `CONFIG_SCSI_MQ_DEFAULT` default to `Y`
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+
+static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
 {
-    rb_erase(&rq->rb_node, &data->root);
+    struct ioem_data* id = container_of(timer, struct ioem_data,
+                         timer);
+
+    blk_mq_run_hw_queue(id->hctx, 1);
+
+    return HRTIMER_NORESTART;
+}
+
+static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
+{
+    struct elevator_queue *eq;
+
+    eq = elevator_alloc(q, e);
+    if (!eq)
+        return -ENOMEM;
+
+    q->elevator = eq;
+
+    return 0;
+}
+
+static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+{
+    struct ioem_data *id;
+
+    id = kmalloc_node(sizeof(*id), GFP_KERNEL, hctx->numa_node);
+    if (!id)
+        return -ENOMEM;
+
+    ioem_data_init(id);
+    id->hctx = hctx;
+
+    hctx->sched_data = id;
+    return 0;
+}
+
+static void ioem_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+{
+    struct ioem_data *id = hctx->sched_data;
+
+    hrtimer_cancel(&id->timer);
+    kfree(hctx->sched_data);
 }
 
 struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
 {
-    struct ioem_hctx_data *ihd = hctx->sched_data;
+    struct ioem_data *id = hctx->sched_data;
     struct request *rq = NULL;
 
-    spin_lock(&ihd->lock);
-    if (!RB_EMPTY_ROOT(&ihd->root)) {
+    spin_lock(&id->lock);
+    if (!RB_EMPTY_ROOT(&id->root)) {
         u64 now, time_to_send;
 
-        rq = ioem_peek_request(ihd);
+        rq = ioem_peek_request(id);
 
         now = ktime_get_ns();
         time_to_send = ioem_priv(rq)->time_to_send;
 
         if (time_to_send <= now) {
-            ioem_erase_head(ihd, rq);
+            ioem_erase_head(id, rq);
         } else {
             rq = NULL;
-            if (hrtimer_is_queued(&ihd->timer)) {
-                if (ihd->last_expires <= time_to_send) {
+            if (hrtimer_is_queued(&id->timer)) {
+                if (id->last_expires <= time_to_send) {
                     goto tail;
                 }
             }
 
-            ihd->last_expires = time_to_send;
-            hrtimer_start(&ihd->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
+            id->last_expires = time_to_send;
+            hrtimer_start(&id->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
         }
     }
 
@@ -156,16 +170,16 @@ tail:
     }
     #endif
 
-    spin_unlock(&ihd->lock);
+    spin_unlock(&id->lock);
 
     return rq;
 }
 
 static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head * list, bool at_head) 
 {
-    struct ioem_hctx_data *ihd = hctx->sched_data;
+    struct ioem_data *id = hctx->sched_data;
 
-    spin_lock(&ihd->lock);
+    spin_lock(&id->lock);
     while (!list_empty(list)) {
         struct request *rq;
 
@@ -176,21 +190,21 @@ static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head *
 
         ioem_error_injection(rq);
 
-        ioem_enqueue(ihd, rq);
+        ioem_enqueue(id, rq);
 
         #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
         atomic_inc(&hctx->elevator_queued);
         #endif
     }
-    spin_unlock(&ihd->lock);
+    spin_unlock(&id->lock);
 }
 
 static bool has_work(struct blk_mq_hw_ctx * hctx)
 {
-    struct ioem_hctx_data *ihd = hctx->sched_data;
+    struct ioem_data *id = hctx->sched_data;
     bool has_work = 0;
 
-    has_work = !RB_EMPTY_ROOT(&ihd->root);
+    has_work = !RB_EMPTY_ROOT(&id->root);
 
     return has_work;
 }
@@ -213,6 +227,134 @@ static struct elevator_type ioem = {
     .elevator_name = "ioem",
     .elevator_owner = THIS_MODULE,
 };
+
+#else
+
+static void ioem_kick_queue(struct work_struct *work)
+{
+	struct ioem_data *id =
+		container_of(work, struct ioem_data, unplug_work);
+	struct request_queue *q = id->q;
+
+	spin_lock_irq(q->queue_lock);
+	__blk_run_queue(q);
+	spin_unlock_irq(q->queue_lock);
+}
+
+static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
+{
+	struct ioem_data *id =
+		container_of(timer, struct ioem_data, timer);
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+    kblockd_schedule_work(&id->unplug_work);
+#else
+    kblockd_schedule_work(id->q, &id->unplug_work);
+#endif
+
+    return HRTIMER_NORESTART;
+}
+
+static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
+{
+    struct elevator_queue *eq;
+    struct ioem_data *id;
+
+    id = kmalloc(sizeof(*id), GFP_KERNEL);
+    if (!id)
+        return -ENOMEM;
+    
+    eq = elevator_alloc(q, e);
+    if (!eq)
+        return -ENOMEM;
+    
+    ioem_data_init(id);
+    id->q = q;
+    INIT_WORK(&id->unplug_work, ioem_kick_queue);
+
+    eq->elevator_data = id;
+    q->elevator = eq;
+
+    return 0;
+}
+
+static void ioem_exit_sched(struct elevator_queue * e)
+{
+    struct ioem_data *id = e->elevator_data;
+
+	BUG_ON(!RB_EMPTY_ROOT(&id->root));
+	kfree(id);
+}
+
+static void ioem_insert_request(struct request_queue *q, struct request *rq)
+{
+    struct ioem_data *id = q->elevator->elevator_data;
+
+    spin_lock(&id->lock);
+
+    ioem_priv(rq)->time_to_send = ktime_get_ns();
+    ioem_error_injection(rq);
+
+    ioem_enqueue(id, rq);
+
+    spin_unlock(&id->lock);
+}
+
+static int ioem_dispatch_request(struct request_queue *q, int force)
+{
+    struct ioem_data *id = q->elevator->elevator_data;
+    struct request *rq = NULL;
+
+    spin_lock(&id->lock);
+    if (!RB_EMPTY_ROOT(&id->root)) {
+        u64 now, time_to_send;
+
+        rq = ioem_peek_request(id);
+
+        now = ktime_get_ns();
+        time_to_send = ioem_priv(rq)->time_to_send;
+
+        if (time_to_send <= now) {
+            ioem_erase_head(id, rq);
+        } else {
+            rq = NULL;
+            if (hrtimer_is_queued(&id->timer)) {
+                if (id->last_expires <= time_to_send) {
+                    goto tail;
+                }
+            }
+
+            id->last_expires = time_to_send;
+            hrtimer_start(&id->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
+        }
+    }
+
+tail:
+    spin_unlock(&id->lock);
+
+    if (rq != NULL) {
+        elv_dispatch_sort(q, rq);
+        return 1;
+    }
+    return 0;
+}
+
+static struct elevator_type ioem = {
+    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+    .ops.sq = {
+    #else
+    .ops = {
+    #endif
+        .elevator_init_fn = ioem_init_sched,
+        .elevator_exit_fn = ioem_exit_sched,
+        .elevator_add_req_fn = ioem_insert_request,
+        .elevator_dispatch_fn = ioem_dispatch_request,
+    },
+    .elevator_name = "ioem",
+    .elevator_owner = THIS_MODULE,
+};
+
+#endif
 
 int ioem_register(void) 
 {

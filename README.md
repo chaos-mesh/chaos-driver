@@ -37,7 +37,8 @@ Injecting too much delay on the root device could make your system blocked. Plea
 - [x] Linux 5.12
 - [x] Linux 5.4 (Ubuntu 20.04 latest kernel)
 - [x] Linux 4.19 (Debian Buster)
-- [ ] Linux 4.15 (Ubuntu 18.04)
+- [x] Linux 4.15 (Ubuntu 18.04)
+    - It once causes kernel panic in `elv_attempt_insert_merge`, but it cannot be reproduced anymore.
 - [ ] Linux 3.10 (CentOS 7)
 
 For Linux 3.10, it still needs a lot more other works. Because the `blk` scheduler is much different from the `blk-mq`.
