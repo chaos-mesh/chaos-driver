@@ -47,6 +47,8 @@ struct ioem_data {
 static void ioem_erase_head(struct ioem_data *data, struct request *rq)
 {
     rb_erase(&rq->rb_node, &data->root);
+    RB_CLEAR_NODE(&rq->rb_node);
+    INIT_LIST_HEAD(&rq->queuelist);
 }
 
 static struct request* ioem_peek_request(struct ioem_data *data)
@@ -88,7 +90,7 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 
 static struct request* ioem_dequeue(struct ioem_data *data)
 {
-    struct request* rq;
+    struct request* rq = NULL;
 
     if (!RB_EMPTY_ROOT(&data->root)) {
         u64 now, time_to_send;
@@ -270,20 +272,25 @@ static int ioem_sq_init_sched(struct request_queue *q, struct elevator_type *e)
     struct elevator_queue *eq;
     struct ioem_data *id;
 
-    id = kmalloc(sizeof(*id), GFP_KERNEL);
-    if (!id)
-        return -ENOMEM;
-    
     eq = elevator_alloc(q, e);
     if (!eq)
         return -ENOMEM;
+
+    id = kmalloc_node(sizeof(*id), GFP_KERNEL, q->node);
+    if (!id) {
+        kobject_put(&eq->kobj);
+        return -ENOMEM;
+    }
     
     ioem_data_init(id, ioem_sq_timer);
     id->q = q;
     INIT_WORK(&id->unplug_work, ioem_sq_kick_queue);
 
     eq->elevator_data = id;
-    q->elevator = eq;
+
+	spin_lock_irq(q->queue_lock);
+	q->elevator = eq;
+	spin_unlock_irq(q->queue_lock);
 
     return 0;
 }
@@ -300,26 +307,19 @@ static void ioem_sq_insert_request(struct request_queue *q, struct request *rq)
 {
     struct ioem_data *id = q->elevator->elevator_data;
 
-    spin_lock(&id->lock);
-
     ioem_priv(rq)->time_to_send = ktime_get_ns();
     ioem_error_injection(rq);
 
     ioem_enqueue(id, rq);
 
-    spin_unlock(&id->lock);
 }
 
 static int ioem_sq_dispatch_request(struct request_queue *q, int force)
 {
     struct ioem_data *id = q->elevator->elevator_data;
     struct request *rq = NULL;
-
-    spin_lock(&id->lock);
     
     rq = ioem_dequeue(id);
-
-    spin_unlock(&id->lock);
 
     if (rq != NULL) {
         elv_dispatch_sort(q, rq);
@@ -328,12 +328,21 @@ static int ioem_sq_dispatch_request(struct request_queue *q, int force)
     return 0;
 }
 
+static void ioem_sq_merged_requests(struct request_queue *q, struct request *rq,
+				 struct request *next)
+{
+    struct ioem_data *id = q->elevator->elevator_data;
+
+	ioem_erase_head(id, rq);
+}
+
 static struct elevator_type ioem_sq = {
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
     .ops.sq = {
     #else
     .ops = {
     #endif
+        .elevator_merge_req_fn = ioem_sq_merged_requests,
         .elevator_init_fn = ioem_sq_init_sched,
         .elevator_exit_fn = ioem_sq_exit_sched,
         .elevator_add_req_fn = ioem_sq_insert_request,
