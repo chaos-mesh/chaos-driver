@@ -491,11 +491,11 @@ err:
 void ioem_unregister(void)
 {
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
-    elv_register(&ioem_mq);
+    elv_unregister(&ioem_mq);
     #endif
 
     #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
-    elv_register(&ioem_sq);
+    elv_unregister(&ioem_sq);
     #endif
 }
 
