@@ -44,6 +44,18 @@ struct ioem_data {
     #endif
 };
 
+static void ioem_erase_head(struct ioem_data *data, struct request *rq)
+{
+    rb_erase(&rq->rb_node, &data->root);
+}
+
+static struct request* ioem_peek_request(struct ioem_data *data)
+{
+    struct request* ioem_rq = rq_rb_first(&data->root);
+
+    return ioem_rq;
+}
+
 static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*function)(struct hrtimer *))
 {
     hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
@@ -74,16 +86,34 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
     rb_insert_color(&rq->rb_node, &data->root);
 }
 
-static void ioem_erase_head(struct ioem_data *data, struct request *rq)
+static struct request* ioem_dequeue(struct ioem_data *data)
 {
-    rb_erase(&rq->rb_node, &data->root);
-}
+    struct request* rq;
 
-static struct request* ioem_peek_request(struct ioem_data *data)
-{
-    struct request* ioem_rq = rq_rb_first(&data->root);
+    if (!RB_EMPTY_ROOT(&data->root)) {
+        u64 now, time_to_send;
 
-    return ioem_rq;
+        rq = ioem_peek_request(data);
+
+        now = ktime_get_ns();
+        time_to_send = ioem_priv(rq)->time_to_send;
+
+        if (time_to_send <= now) {
+            ioem_erase_head(data, rq);
+        } else {
+            rq = NULL;
+            if (hrtimer_is_queued(&data->timer)) {
+                if (data->last_expires <= time_to_send) {
+                    return NULL;
+                }
+            }
+
+            data->last_expires = time_to_send;
+            hrtimer_start(&data->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
+        }
+    }
+
+    return rq;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
@@ -140,30 +170,9 @@ struct request* ioem_mq_dispatch_request(struct blk_mq_hw_ctx * hctx)
     struct request *rq = NULL;
 
     spin_lock(&id->lock);
-    if (!RB_EMPTY_ROOT(&id->root)) {
-        u64 now, time_to_send;
+    
+    rq = ioem_dequeue(id);
 
-        rq = ioem_peek_request(id);
-
-        now = ktime_get_ns();
-        time_to_send = ioem_priv(rq)->time_to_send;
-
-        if (time_to_send <= now) {
-            ioem_erase_head(id, rq);
-        } else {
-            rq = NULL;
-            if (hrtimer_is_queued(&id->timer)) {
-                if (id->last_expires <= time_to_send) {
-                    goto tail;
-                }
-            }
-
-            id->last_expires = time_to_send;
-            hrtimer_start(&id->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
-        }
-    }
-
-tail:
     #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
     if (rq != NULL) {
         atomic_dec(&hctx->elevator_queued);
@@ -307,30 +316,9 @@ static int ioem_sq_dispatch_request(struct request_queue *q, int force)
     struct request *rq = NULL;
 
     spin_lock(&id->lock);
-    if (!RB_EMPTY_ROOT(&id->root)) {
-        u64 now, time_to_send;
+    
+    rq = ioem_dequeue(id);
 
-        rq = ioem_peek_request(id);
-
-        now = ktime_get_ns();
-        time_to_send = ioem_priv(rq)->time_to_send;
-
-        if (time_to_send <= now) {
-            ioem_erase_head(id, rq);
-        } else {
-            rq = NULL;
-            if (hrtimer_is_queued(&id->timer)) {
-                if (id->last_expires <= time_to_send) {
-                    goto tail;
-                }
-            }
-
-            id->last_expires = time_to_send;
-            hrtimer_start(&id->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
-        }
-    }
-
-tail:
     spin_unlock(&id->lock);
 
     if (rq != NULL) {
