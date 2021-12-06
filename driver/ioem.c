@@ -10,9 +10,9 @@
 #include <linux/ktime.h>
 
 #include "ioem.h"
+#include "comp.h"
 
 void ioem_error_injection(struct request* rq);
-static enum hrtimer_restart ioem_timer(struct hrtimer * timer);
 
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
@@ -34,21 +34,23 @@ struct ioem_data {
     struct hrtimer timer;
     u64 last_expires;
 
-    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
     struct blk_mq_hw_ctx* hctx;
-    #else
+    #endif
+
+    #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
     struct request_queue* q;
     struct work_struct unplug_work;
     #endif
 };
 
-static void ioem_data_init(struct ioem_data* data)
+static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*function)(struct hrtimer *))
 {
     hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 
     spin_lock_init(&data->lock);
     data->root = RB_ROOT;
-    data->timer.function = ioem_timer;
+    data->timer.function = function;
     data->last_expires = 0;
 }
 
@@ -84,11 +86,9 @@ static struct request* ioem_peek_request(struct ioem_data *data)
     return ioem_rq;
 }
 
-// Though since linux-4.0, blk-mq is merged into the kernel, we still need to
-// wait until linux 4.19 to set `CONFIG_SCSI_MQ_DEFAULT` default to `Y`
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
 
-static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
+static enum hrtimer_restart ioem_mq_timer(struct hrtimer * timer)
 {
     struct ioem_data* id = container_of(timer, struct ioem_data,
                          timer);
@@ -98,7 +98,7 @@ static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
     return HRTIMER_NORESTART;
 }
 
-static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
+static int ioem_mq_init_sched(struct request_queue *q, struct elevator_type *e)
 {
     struct elevator_queue *eq;
 
@@ -111,7 +111,7 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
     return 0;
 }
 
-static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+static int ioem_mq_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 {
     struct ioem_data *id;
 
@@ -119,14 +119,14 @@ static int ioem_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
     if (!id)
         return -ENOMEM;
 
-    ioem_data_init(id);
+    ioem_data_init(id, ioem_mq_timer);
     id->hctx = hctx;
 
     hctx->sched_data = id;
     return 0;
 }
 
-static void ioem_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+static void ioem_mq_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 {
     struct ioem_data *id = hctx->sched_data;
 
@@ -134,7 +134,7 @@ static void ioem_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
     kfree(hctx->sched_data);
 }
 
-struct request* ioem_dispatch_request(struct blk_mq_hw_ctx * hctx)
+struct request* ioem_mq_dispatch_request(struct blk_mq_hw_ctx * hctx)
 {
     struct ioem_data *id = hctx->sched_data;
     struct request *rq = NULL;
@@ -175,7 +175,7 @@ tail:
     return rq;
 }
 
-static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head * list, bool at_head) 
+static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head * list, bool at_head) 
 {
     struct ioem_data *id = hctx->sched_data;
 
@@ -199,7 +199,7 @@ static void ioem_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head *
     spin_unlock(&id->lock);
 }
 
-static bool has_work(struct blk_mq_hw_ctx * hctx)
+static bool ioem_mq_has_work(struct blk_mq_hw_ctx * hctx)
 {
     struct ioem_data *id = hctx->sched_data;
     bool has_work = 0;
@@ -209,28 +209,30 @@ static bool has_work(struct blk_mq_hw_ctx * hctx)
     return has_work;
 }
 
-static struct elevator_type ioem = {
+static struct elevator_type ioem_mq = {
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0))
     .ops = {
     #else
     .uses_mq = true,
     .ops.mq = {
     #endif
-        .init_sched = ioem_init_sched,
-        .init_hctx = ioem_init_hctx,
-        .exit_hctx = ioem_exit_hctx,
+        .init_sched = ioem_mq_init_sched,
+        .init_hctx = ioem_mq_init_hctx,
+        .exit_hctx = ioem_mq_exit_hctx,
 
-        .insert_requests = ioem_insert_requests,
-        .dispatch_request = ioem_dispatch_request,
-        .has_work = has_work,
+        .insert_requests = ioem_mq_insert_requests,
+        .dispatch_request = ioem_mq_dispatch_request,
+        .has_work = ioem_mq_has_work,
     },
-    .elevator_name = "ioem",
+    .elevator_name = "ioem-mq",
     .elevator_owner = THIS_MODULE,
 };
 
-#else
+#endif
 
-static void ioem_kick_queue(struct work_struct *work)
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
+
+static void ioem_sq_kick_queue(struct work_struct *work)
 {
 	struct ioem_data *id =
 		container_of(work, struct ioem_data, unplug_work);
@@ -241,21 +243,20 @@ static void ioem_kick_queue(struct work_struct *work)
 	spin_unlock_irq(q->queue_lock);
 }
 
-static enum hrtimer_restart ioem_timer(struct hrtimer * timer)
+static enum hrtimer_restart ioem_sq_timer(struct hrtimer * timer)
 {
 	struct ioem_data *id =
 		container_of(timer, struct ioem_data, timer);
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+    // though in 3.10 kernel, the signature of it was  `int kblockd_schedule_work(struct request_queue *q, struct work_struct *work);`
+    // it has been updated to `int kblockd_schedule_work(struct work_struct *work);` in centos 7.
+    // TODO: check the centos build version to decide the signature
     kblockd_schedule_work(&id->unplug_work);
-#else
-    kblockd_schedule_work(id->q, &id->unplug_work);
-#endif
 
     return HRTIMER_NORESTART;
 }
 
-static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
+static int ioem_sq_init_sched(struct request_queue *q, struct elevator_type *e)
 {
     struct elevator_queue *eq;
     struct ioem_data *id;
@@ -268,9 +269,9 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
     if (!eq)
         return -ENOMEM;
     
-    ioem_data_init(id);
+    ioem_data_init(id, ioem_sq_timer);
     id->q = q;
-    INIT_WORK(&id->unplug_work, ioem_kick_queue);
+    INIT_WORK(&id->unplug_work, ioem_sq_kick_queue);
 
     eq->elevator_data = id;
     q->elevator = eq;
@@ -278,7 +279,7 @@ static int ioem_init_sched(struct request_queue *q, struct elevator_type *e)
     return 0;
 }
 
-static void ioem_exit_sched(struct elevator_queue * e)
+static void ioem_sq_exit_sched(struct elevator_queue * e)
 {
     struct ioem_data *id = e->elevator_data;
 
@@ -286,7 +287,7 @@ static void ioem_exit_sched(struct elevator_queue * e)
 	kfree(id);
 }
 
-static void ioem_insert_request(struct request_queue *q, struct request *rq)
+static void ioem_sq_insert_request(struct request_queue *q, struct request *rq)
 {
     struct ioem_data *id = q->elevator->elevator_data;
 
@@ -300,7 +301,7 @@ static void ioem_insert_request(struct request_queue *q, struct request *rq)
     spin_unlock(&id->lock);
 }
 
-static int ioem_dispatch_request(struct request_queue *q, int force)
+static int ioem_sq_dispatch_request(struct request_queue *q, int force)
 {
     struct ioem_data *id = q->elevator->elevator_data;
     struct request *rq = NULL;
@@ -339,16 +340,16 @@ tail:
     return 0;
 }
 
-static struct elevator_type ioem = {
+static struct elevator_type ioem_sq = {
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
     .ops.sq = {
     #else
     .ops = {
     #endif
-        .elevator_init_fn = ioem_init_sched,
-        .elevator_exit_fn = ioem_exit_sched,
-        .elevator_add_req_fn = ioem_insert_request,
-        .elevator_dispatch_fn = ioem_dispatch_request,
+        .elevator_init_fn = ioem_sq_init_sched,
+        .elevator_exit_fn = ioem_sq_exit_sched,
+        .elevator_add_req_fn = ioem_sq_insert_request,
+        .elevator_dispatch_fn = ioem_sq_dispatch_request,
     },
     .elevator_name = "ioem",
     .elevator_owner = THIS_MODULE,
@@ -358,12 +359,37 @@ static struct elevator_type ioem = {
 
 int ioem_register(void) 
 {
-    return elv_register(&ioem);
+    int ret = 0;
+
+    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+    ret = elv_register(&ioem_mq);
+    if (ret != 0) {
+        goto err;
+    }
+    #endif
+
+    #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
+    ret = elv_register(&ioem_sq);
+    if (ret != 0) {
+        goto err;
+    }
+    #endif
+
+    return 0;
+err:
+    pr_err("ioem: failed to register ioem_mq: %d\n", ret);
+    return ret;
 }
 
 void ioem_unregister(void)
 {
-    elv_unregister(&ioem);
+    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+    elv_register(&ioem_mq);
+    #endif
+
+    #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
+    elv_register(&ioem_sq);
+    #endif
 }
 
 struct ioem_injection {
@@ -494,22 +520,16 @@ void ioem_error_injection(struct request* rq)
             continue;
         }
 
-        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0))
-        if (e->arg.device != 0 && (rq->bio != NULL && rq->bio->bi_disk != NULL && disk_devt(rq->bio->bi_disk) != e->arg.device)) {
-        #else
-        if (e->arg.device != 0 && (rq->bio->bi_bdev != NULL && rq->bio->bi_bdev->bd_dev != e->arg.device)) {
-        #endif
+        if (e->arg.device != 0 && !bio_is_device(rq->bio, e->arg.device)) {
             continue;
         }
 
         if (e->arg.op) 
         {
-            unsigned int op = rq->bio->bi_opf & REQ_OP_MASK;
-            if (e->arg.op == 1 && !(op == REQ_OP_WRITE || op == REQ_OP_WRITE_SAME || op == REQ_OP_WRITE_ZEROES))
-            {
+            if (e->arg.op == 1 && !bio_is_read(rq->bio)) {
                 continue;
             }
-            if (e->arg.op == 2 && !(op == REQ_OP_READ))
+            if (e->arg.op == 2 && !bio_is_write(rq->bio))
             {
                 continue;
             }
