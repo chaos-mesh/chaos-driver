@@ -17,6 +17,74 @@ void ioem_error_injection(struct request* rq);
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
 
+
+struct ioem_request_limit {
+    atomic64_t io_period_us;
+    atomic64_t io_quota_us;
+
+    atomic64_t io_counter;
+    atomic64_t last_expire_time;
+    struct hrtimer timer;
+};
+
+static void ioem_request_limit_change(struct ioem_request_limit* counter, u64 io_period_us, u64 io_quota_us)
+{
+    atomic64_set(&counter->io_period_us, io_period_us);
+    atomic64_set(&counter->io_quota_us, io_quota_us);
+
+    if (io_period_us > 0) {
+        hrtimer_start(&counter->timer, io_period_us * NSEC_PER_USEC, HRTIMER_MODE_ABS_PINNED);
+    } else {
+        hrtimer_cancel(&counter->timer);
+    }
+}
+
+static enum hrtimer_restart ioem_request_limit_timer_callback(struct hrtimer * timer)
+{
+    u64 period_us = 0;
+
+    struct ioem_request_limit* counter = container_of(timer, struct ioem_request_limit, timer);
+
+    atomic64_set(&counter->io_counter, 0);
+    atomic64_set(&counter->last_expire_time, timer->base->get_time());
+
+    period_us = atomic64_read(&counter->io_period_us);
+    if (period_us > 0) {
+        hrtimer_forward_now(timer, period_us * NSEC_PER_USEC);
+        return HRTIMER_RESTART;
+    } else {
+        return HRTIMER_NORESTART;
+    }
+}
+
+static void ioem_request_limit_init(struct ioem_request_limit* counter)
+{
+    hrtimer_init(&counter->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
+    counter->timer.function = ioem_request_limit_timer_callback;
+}
+
+struct ioem_request_limit_dispatch_return {
+    bool dispatch;
+    u64 time_to_send;
+};
+
+static struct ioem_request_limit_dispatch_return ioem_request_limit_dispatch(struct ioem_request_limit* counter)
+{
+    struct ioem_request_limit_dispatch_return ret;
+
+    // The usage of `atomic64` is somehow wrong: multiple `atomic_read` doesn't
+    // come from the same snapshot, but the wrong value can be tolerated.
+    if (atomic64_fetch_inc(&counter->io_counter) < atomic64_read(&counter->io_quota_us)) {
+        ret.dispatch = 1;
+        ret.time_to_send = 0;
+        return ret;
+    }
+
+    ret.dispatch = 0;
+    ret.time_to_send = ktime_get_ns() + atomic64_read(&counter->io_period_us) * NSEC_PER_USEC;
+    return ret;
+}
+
 struct ioem_priv {
     u64 time_to_send;
 };
@@ -33,6 +101,8 @@ struct ioem_data {
 
     struct hrtimer timer;
     u64 last_expires;
+
+    struct ioem_request_limit* irl;
 
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
     struct blk_mq_hw_ctx* hctx;
@@ -58,14 +128,16 @@ static struct request* ioem_peek_request(struct ioem_data *data)
     return ioem_rq;
 }
 
-static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*function)(struct hrtimer *))
+static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*function)(struct hrtimer *), struct ioem_request_limit* irl)
 {
-    hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+    hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
 
     spin_lock_init(&data->lock);
     data->root = RB_ROOT;
     data->timer.function = function;
     data->last_expires = 0;
+
+    data->irl = irl;
 }
 
 static void ioem_enqueue(struct ioem_data *data, struct request *rq)
@@ -90,32 +162,43 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 
 static struct request* ioem_dequeue(struct ioem_data *data)
 {
+    u64 now, time_to_send;
     struct request* rq = NULL;
 
     if (!RB_EMPTY_ROOT(&data->root)) {
-        u64 now, time_to_send;
-
         rq = ioem_peek_request(data);
 
         now = ktime_get_ns();
         time_to_send = ioem_priv(rq)->time_to_send;
 
         if (time_to_send <= now) {
-            ioem_erase_head(data, rq);
+            struct ioem_request_limit_dispatch_return irl_ret;
+            irl_ret = ioem_request_limit_dispatch(data->irl);
+            if (irl_ret.dispatch > 0) {
+                ioem_erase_head(data, rq);
+            } else {
+                time_to_send = irl_ret.time_to_send;
+                rq = NULL;
+            }
         } else {
             rq = NULL;
-            if (hrtimer_is_queued(&data->timer)) {
-                if (data->last_expires <= time_to_send) {
-                    return NULL;
-                }
-            }
-
-            data->last_expires = time_to_send;
-            hrtimer_start(&data->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS);
         }
     }
 
-    return rq;
+    if (rq != NULL) {
+        return rq;
+    }
+
+    if (hrtimer_is_queued(&data->timer)) {
+        if (data->last_expires <= time_to_send) {
+            return NULL;
+        }
+    }
+
+    data->last_expires = time_to_send;
+    hrtimer_start(&data->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS_PINNED);
+
+    return NULL;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
@@ -133,25 +216,41 @@ static enum hrtimer_restart ioem_mq_timer(struct hrtimer * timer)
 static int ioem_mq_init_sched(struct request_queue *q, struct elevator_type *e)
 {
     struct elevator_queue *eq;
+    struct ioem_request_limit *irl;
 
     eq = elevator_alloc(q, e);
     if (!eq)
         return -ENOMEM;
+    
+    irl = kzalloc_node(sizeof(*irl), GFP_KERNEL, q->node);
+	if (!irl) {
+		kobject_put(&eq->kobj);
+		return -ENOMEM;
+	}
+    ioem_request_limit_init(irl);
 
+    eq->elevator_data = irl;
     q->elevator = eq;
 
     return 0;
+}
+
+static void ioem_mq_exit_sched(struct elevator_queue *e)
+{
+    struct ioem_request_limit *irl = e->elevator_data;
+    hrtimer_cancel(&irl->timer);
+    kfree(irl);
 }
 
 static int ioem_mq_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 {
     struct ioem_data *id;
 
-    id = kmalloc_node(sizeof(*id), GFP_KERNEL, hctx->numa_node);
+    id = kzalloc_node(sizeof(*id), GFP_KERNEL, hctx->numa_node);
     if (!id)
         return -ENOMEM;
 
-    ioem_data_init(id, ioem_mq_timer);
+    ioem_data_init(id, ioem_mq_timer, hctx->queue->elevator->elevator_data);
     id->hctx = hctx;
 
     hctx->sched_data = id;
@@ -228,6 +327,7 @@ static struct elevator_type ioem_mq = {
     .ops.mq = {
     #endif
         .init_sched = ioem_mq_init_sched,
+        .exit_sched = ioem_mq_exit_sched,
         .init_hctx = ioem_mq_init_hctx,
         .exit_hctx = ioem_mq_exit_hctx,
 
@@ -271,18 +371,26 @@ static int ioem_sq_init_sched(struct request_queue *q, struct elevator_type *e)
 {
     struct elevator_queue *eq;
     struct ioem_data *id;
+    struct ioem_request_limit *irl;
 
     eq = elevator_alloc(q, e);
     if (!eq)
         return -ENOMEM;
 
-    id = kmalloc_node(sizeof(*id), GFP_KERNEL, q->node);
+    irl = kzalloc_node(sizeof(*irl), GFP_KERNEL, q->node);
+	if (!irl) {
+		kobject_put(&eq->kobj);
+		return -ENOMEM;
+	}
+    ioem_request_limit_init(irl);
+
+    id = kzalloc_node(sizeof(*id), GFP_KERNEL, q->node);
     if (!id) {
         kobject_put(&eq->kobj);
         return -ENOMEM;
     }
     
-    ioem_data_init(id, ioem_sq_timer);
+    ioem_data_init(id, ioem_sq_timer, irl);
     id->q = q;
     INIT_WORK(&id->unplug_work, ioem_sq_kick_queue);
 
@@ -300,6 +408,8 @@ static void ioem_sq_exit_sched(struct elevator_queue * e)
     struct ioem_data *id = e->elevator_data;
 
 	BUG_ON(!RB_EMPTY_ROOT(&id->root));
+    hrtimer_cancel(&id->irl->timer);
+	kfree(id->irl);
 	kfree(id);
 }
 
