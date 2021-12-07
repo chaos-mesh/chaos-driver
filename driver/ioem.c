@@ -55,7 +55,7 @@ static void irl_change(struct irl* counter, u64 io_period_us, u64 io_quota)
     counter->io_quota = io_quota;
     atomic64_set(&counter->io_period_us, io_period_us);
     if (io_period_us > 0) {
-        hrtimer_start(&counter->timer, io_period_us * NSEC_PER_USEC, HRTIMER_MODE_ABS_PINNED);
+        hrtimer_start(&counter->timer, ns_to_ktime(io_period_us * NSEC_PER_USEC), HRTIMER_MODE_ABS_PINNED);
     } else {
         hrtimer_cancel(&counter->timer);
     }
@@ -69,12 +69,12 @@ static enum hrtimer_restart irl_timer_callback(struct hrtimer * timer)
 
     struct irl* counter = container_of(timer, struct irl, timer);
 
-    atomic64_set(&counter->last_expire_time, timer->base->get_time());
+    atomic64_set(&counter->last_expire_time, ktime_to_ns(timer->base->get_time()));
     atomic64_set(&counter->io_counter, 0);
 
     period_us = atomic64_read(&counter->io_period_us);
     if (period_us > 0) {
-        hrtimer_forward_now(timer, period_us * NSEC_PER_USEC);
+        hrtimer_forward_now(timer, ns_to_ktime(period_us * NSEC_PER_USEC));
         ret = HRTIMER_RESTART;
     } else {
         ret = HRTIMER_NORESTART;
@@ -306,24 +306,26 @@ static struct request* ioem_dequeue(struct ioem_data *data)
     u64 now, time_to_send;
     struct request* rq = NULL;
 
-    if (!RB_EMPTY_ROOT(&data->root)) {
-        rq = ioem_peek_request(data);
+    if (RB_EMPTY_ROOT(&data->root)) {
+        return NULL;
+    }
 
-        now = ktime_get_ns();
-        time_to_send = ioem_priv(rq)->time_to_send;
+    rq = ioem_peek_request(data);
 
-        if (time_to_send <= now) {
-            struct irl_dispatch_return irl_ret;
-            irl_ret = irl_dispatch(data->irl, rq);
-            if (irl_ret.dispatch > 0) {
-                ioem_erase_head(data, rq);
-            } else {
-                time_to_send = irl_ret.time_to_send;
-                rq = NULL;
-            }
+    now = ktime_get_ns();
+    time_to_send = ioem_priv(rq)->time_to_send;
+
+    if (time_to_send <= now) {
+        struct irl_dispatch_return irl_ret;
+        irl_ret = irl_dispatch(data->irl, rq);
+        if (irl_ret.dispatch > 0) {
+            ioem_erase_head(data, rq);
         } else {
+            time_to_send = irl_ret.time_to_send;
             rq = NULL;
         }
+    } else {
+        rq = NULL;
     }
 
     if (rq != NULL) {

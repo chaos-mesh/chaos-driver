@@ -12,7 +12,7 @@
 #else
 
 #define bio_comp_op(bio) (bio->bi_rw)
-#define bio_is_write(bio) ((bio_comp_op(bio) & REQ_WRITE) || (op & REQ_WRITE_SAME))
+#define bio_is_write(bio) ((bio_comp_op(bio) & REQ_WRITE) || (bio_comp_op(bio) & REQ_WRITE_SAME))
 #define bio_is_read(bio) !(bio_is_write(bio))
 
 #endif
