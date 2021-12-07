@@ -54,5 +54,5 @@ func init() {
 	Limit.MarkFlagRequired("period-us")
 
 	Limit.Flags().Uint64Var(&quota, "quota", 0, "the quota of IO during one period")
-	Limit.MarkFlagRequired("period-us")
+	Limit.MarkFlagRequired("quota")
 }

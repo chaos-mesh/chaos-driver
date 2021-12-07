@@ -15,6 +15,9 @@
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
 
+static void ioem_error_injection(struct request* rq);
+static bool ioem_limit_should_affect(struct request* rq);
+
 /**
  * struct irl - request limit
  * @lock: The lock protects the config
@@ -26,18 +29,19 @@
  *
  * Every device (request_queue) should have one `irl`. This struct can be used
  * to implement the limit of IOPS
+ *
+ * Before getting the write lock of `irl`, please cancel the `hrtimer` to avoid
+ * deadlock.
  */
 struct irl {
     rwlock_t lock;
-    u64 io_period_us;
+    atomic64_t io_period_us;
     u64 io_quota;
 
     atomic64_t io_counter;
     atomic64_t last_expire_time;
     struct hrtimer timer;
 };
-
-void ioem_error_injection(struct irl* irl, struct request* rq);
 
 /**
  * irl_change() - change the config of irl
@@ -48,15 +52,13 @@ void ioem_error_injection(struct irl* irl, struct request* rq);
 static void irl_change(struct irl* counter, u64 io_period_us, u64 io_quota)
 {
     write_lock(&counter->lock);
-
     counter->io_quota = io_quota;
-    if (counter->io_period_us == 0) {
+    atomic64_set(&counter->io_period_us, io_period_us);
+    if (io_period_us > 0) {
         hrtimer_start(&counter->timer, io_period_us * NSEC_PER_USEC, HRTIMER_MODE_ABS_PINNED);
     } else {
         hrtimer_cancel(&counter->timer);
     }
-    counter->io_period_us = io_period_us;
-
     write_unlock(&counter->lock);
 }
 
@@ -70,15 +72,13 @@ static enum hrtimer_restart irl_timer_callback(struct hrtimer * timer)
     atomic64_set(&counter->last_expire_time, timer->base->get_time());
     atomic64_set(&counter->io_counter, 0);
 
-    read_lock(&counter->lock);
-    period_us = counter->io_period_us;
+    period_us = atomic64_read(&counter->io_period_us);
     if (period_us > 0) {
         hrtimer_forward_now(timer, period_us * NSEC_PER_USEC);
         ret = HRTIMER_RESTART;
     } else {
         ret = HRTIMER_NORESTART;
     }
-    read_unlock(&counter->lock);
 
     return ret;
 }
@@ -98,6 +98,7 @@ struct irl_dispatch_return {
 /**
  * irl_dispatch() - change the config of irl
  * @irl: The corresponding irl struct
+ * @rq: The request to be dispatch
  *
  * This function will increase the counter inside the irl. If the counter exceed
  * the quota, it will return `{0, time_to_send}`. Tthe `time_to_send` is the
@@ -106,14 +107,17 @@ struct irl_dispatch_return {
  *
  * If the counter didn't exceed the quota, it will return `{1, 0}`
  */
-static struct irl_dispatch_return irl_dispatch(struct irl* irl)
+static struct irl_dispatch_return irl_dispatch(struct irl* irl, struct request* rq)
 {
     struct irl_dispatch_return ret;
     u64 counter;
     u64 quota;
+    u64 period;
 
     read_lock(&irl->lock);
-    if (irl->io_period_us == 0) {
+
+    period = atomic64_read(&irl->io_period_us);
+    if (period == 0 || !ioem_limit_should_affect(rq)) {
         // the irl is not enabled
         ret.dispatch = 1;
         ret.time_to_send = 0;
@@ -133,9 +137,10 @@ static struct irl_dispatch_return irl_dispatch(struct irl* irl)
             ret.time_to_send = 0;
         } else { 
             ret.dispatch = 0;
-            ret.time_to_send = ktime_get_ns() + irl->io_period_us * NSEC_PER_USEC;
+            ret.time_to_send = ktime_get_ns() + period * NSEC_PER_USEC;
         }
     }
+
     read_unlock(&irl->lock);
 
     return ret;
@@ -170,6 +175,9 @@ struct ioem_priv* ioem_priv(struct request *rq)
  * @irl: The pointer to irl. It doesn't need to have the `irl`, which means the
  * `irl` may be allocated and stored in other structure, and this is only a
  * reference.
+ * @ioem_injection_version: Mark of the synced version of injection version. If
+ * the version is smaller than the global `ioem_injection_version`, then it
+ * needs to sync the config to irl
  * @hctx: For blk-mq, this is a pointer to hardward queue.
  * @q: Only for blk-sq, this is a pointer to the software request queue.
  * @unplug_work: Only for blk-sq, this is a `kblockd work_struct` to trigger the
@@ -188,6 +196,8 @@ struct ioem_data {
 
     struct irl* irl;
 
+    u32 ioem_injection_version;
+
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
     struct blk_mq_hw_ctx* hctx;
     #endif
@@ -197,6 +207,8 @@ struct ioem_data {
     struct work_struct unplug_work;
     #endif
 };
+
+static void ioem_data_sync_with_injections(struct ioem_data* data);
 
 /**
  * ioem_erase_head() - remove the request from ioem data
@@ -302,7 +314,7 @@ static struct request* ioem_dequeue(struct ioem_data *data)
 
         if (time_to_send <= now) {
             struct irl_dispatch_return irl_ret;
-            irl_ret = irl_dispatch(data->irl);
+            irl_ret = irl_dispatch(data->irl, rq);
             if (irl_ret.dispatch > 0) {
                 ioem_erase_head(data, rq);
             } else {
@@ -448,6 +460,8 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
     struct ioem_data *id = hctx->sched_data;
 
     spin_lock(&id->lock);
+    ioem_data_sync_with_injections(id);
+
     while (!list_empty(list)) {
         struct request *rq;
 
@@ -456,7 +470,7 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
 
         ioem_priv(rq)->time_to_send = ktime_get_ns();
 
-        ioem_error_injection(id->irl, rq);
+        ioem_error_injection(rq);
 
         ioem_enqueue(id, rq);
 
@@ -596,8 +610,9 @@ static void ioem_sq_insert_request(struct request_queue *q, struct request *rq)
 {
     struct ioem_data *id = q->elevator->elevator_data;
 
+    ioem_data_sync_with_injections(id);
     ioem_priv(rq)->time_to_send = ktime_get_ns();
-    ioem_error_injection(id->irl, rq);
+    ioem_error_injection(rq);
 
     ioem_enqueue(id, rq);
 
@@ -699,13 +714,21 @@ struct ioem_injection {
         struct {
             u64 period_us;
             u64 quota;
-            atomic_t injected;
         } limit;
     };
 };
 
-LIST_HEAD(ioem_injection_list);
-DEFINE_RWLOCK(ioem_injection_list_lock);
+static struct {
+    rwlock_t lock;
+    struct list_head list;
+    atomic_t version;
+    struct ioem_injection* ioem_limit;
+} ioem_injections = {
+    .list = LIST_HEAD_INIT(ioem_injections.list),
+    .lock = __RW_LOCK_UNLOCKED(ioem_injections.lock),
+    .version = ATOMIC_INIT(0),
+    .ioem_limit = NULL,
+};
 
 int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
 {
@@ -731,6 +754,7 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
 
     ioem_injection->arg.device = new_decode_dev(ioem_injection->arg.device);
 
+    ioem_injection->injector_type = injection->injector_type;
     switch (injection->injector_type)
     {
     case IOEM_INJECTOR_TYPE_DELAY:
@@ -752,16 +776,18 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
         }
         ioem_injection->limit.period_us = limit_arg.period_us;
         ioem_injection->limit.quota = limit_arg.quota;
-        ioem_injection->limit.injected.counter = 0;
 
         break;
     default:
         break;
     }
 
-    write_lock(&ioem_injection_list_lock);
-    list_add(&ioem_injection->list, &ioem_injection_list);
-    write_unlock(&ioem_injection_list_lock);
+    write_lock(&ioem_injections.lock);
+
+    list_add(&ioem_injection->list, &ioem_injections.list);
+    atomic_inc(&ioem_injections.version);
+
+    write_unlock(&ioem_injections.lock);
 
     return ret;
 
@@ -774,9 +800,9 @@ free_matcher_arg:
 int ioem_del(unsigned long id) {
     struct ioem_injection* e, *tmp;
 
-    write_lock(&ioem_injection_list_lock);
+    write_lock(&ioem_injections.lock);
 
-    list_for_each_entry_safe(e, tmp, &ioem_injection_list, list)
+    list_for_each_entry_safe(e, tmp, &ioem_injections.list, list)
     {
         if ( e->id == id )
         {
@@ -785,7 +811,9 @@ int ioem_del(unsigned long id) {
         }
     }
 
-    write_unlock(&ioem_injection_list_lock);
+    atomic_inc(&ioem_injections.version);
+
+    write_unlock(&ioem_injections.lock);
 
     return 0;
 }
@@ -816,32 +844,39 @@ static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
     return ((rnd % (2 * (u32)jitter)) + mu) - jitter;
 }
 
-void ioem_error_injection(struct irl* irl, struct request* rq)
+static bool ioem_should_inject(struct request* rq, struct ioem_injection* e) {
+    if (rq->bio == NULL) {
+        return 0;
+    }
+
+    if (e->arg.device != 0 && !bio_is_device(rq->bio, e->arg.device)) {
+        return 0;
+    }
+
+    if (e->arg.op) 
+    {
+        if (e->arg.op == 1 && !bio_is_read(rq->bio)) {
+            return 0;
+        }
+        if (e->arg.op == 2 && !bio_is_write(rq->bio))
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static void ioem_error_injection(struct request* rq)
 {
     struct ioem_injection* e;
     u64 delay = 0;
 
-    read_lock(&ioem_injection_list_lock);
-
-    list_for_each_entry(e, &ioem_injection_list, list)
+    read_lock(&ioem_injections.lock);
+    list_for_each_entry(e, &ioem_injections.list, list)
     {
-        if (rq->bio == NULL) {
+        if (!ioem_should_inject(rq, e)) {
             continue;
-        }
-
-        if (e->arg.device != 0 && !bio_is_device(rq->bio, e->arg.device)) {
-            continue;
-        }
-
-        if (e->arg.op) 
-        {
-            if (e->arg.op == 1 && !bio_is_read(rq->bio)) {
-                continue;
-            }
-            if (e->arg.op == 2 && !bio_is_write(rq->bio))
-            {
-                continue;
-            }
         }
 
         switch (e->injector_type)
@@ -849,17 +884,50 @@ void ioem_error_injection(struct irl* irl, struct request* rq)
         case IOEM_INJECTOR_TYPE_DELAY:
             delay += ioem_random(e->delay.delay, e->delay.delay_jitter, &e->delay.delay_cor);
             break;
-        case IOEM_INJECTOR_TYPE_LIMIT:
-            if (atomic_cmpxchg(&e->limit.injected, 0, 1) == 0) {
-                irl_change(irl, e->limit.period_us, e->limit.quota);
-            }
         default:
             break;
         }
     }
-
-    read_unlock(&ioem_injection_list_lock);
+    read_unlock(&ioem_injections.lock);
 
     ioem_priv(rq)->time_to_send += delay;
     return;
+}
+
+static bool ioem_limit_should_affect(struct request* rq)
+{
+    bool should_affect;
+
+    read_lock(&ioem_injections.lock);
+    should_affect = ioem_should_inject(rq, ioem_injections.ioem_limit);
+    read_unlock(&ioem_injections.lock);
+
+    return should_affect;
+}
+
+static void ioem_data_sync_with_injections(struct ioem_data* data)
+{
+    struct ioem_injection* e;
+    u32 version = atomic_read(&ioem_injections.version);
+
+    if (version > data->ioem_injection_version) {
+        write_lock(&ioem_injections.lock);
+
+        irl_change(data->irl, 0, 0);
+        ioem_injections.ioem_limit = NULL;
+
+        list_for_each_entry(e, &ioem_injections.list, list)
+        {
+            if (e->injector_type == IOEM_INJECTOR_TYPE_LIMIT) {
+                irl_change(data->irl, e->limit.period_us, e->limit.quota);
+                ioem_injections.ioem_limit = e;
+                // multiple limit is not supported
+                break;
+            }
+        }
+
+        data->ioem_injection_version = atomic_read(&ioem_injections.version);
+
+        write_unlock(&ioem_injections.lock);
+    }
 }
