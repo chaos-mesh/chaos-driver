@@ -474,7 +474,7 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
         list_del_init(&rq->queuelist);
 
         ioem_priv(rq)->time_to_send = ktime_get_ns();
-        ioem_priv(rq)->pid_ns = task_active_pid_ns(current)->ns.inum;
+        ioem_priv(rq)->pid_ns = ns_inum(task_active_pid_ns(current));
 
         ioem_error_injection(rq);
 
@@ -753,7 +753,7 @@ static int ioem_get_pid_ns_inode_from_pid(unsigned int pid_nr, unsigned int* out
 
     task = pid_task(pid, PIDTYPE_PID);
     if (task) {
-        task = get_task_struct(task);
+        get_task_struct(task);
     } else {
         ret = ENOENT;
         goto release_pid;
@@ -763,7 +763,7 @@ static int ioem_get_pid_ns_inode_from_pid(unsigned int pid_nr, unsigned int* out
 
     ns = task_active_pid_ns(task);
     if (ns) {
-        *out = ns->ns.inum;
+        *out = ns_inum(ns);
     } else {
         ret = ENOENT;
     }

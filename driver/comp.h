@@ -27,4 +27,14 @@
 
 #endif 
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+
+#define ns_inum(n) (n->ns.inum)
+
+#else
+
+#define ns_inum(ns) (ns->proc_inum)
+
+#endif
+
 #endif
