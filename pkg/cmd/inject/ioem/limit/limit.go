@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 
-package delay
+package limit
 
 import (
 	"fmt"
@@ -36,7 +36,7 @@ var Limit = &cobra.Command{
 			os.Exit(1)
 		}
 
-		id, err := c.InjectIOEMDelay(dev_path, op, delay, corr, jitter)
+		id, err := c.InjectIOEMLimit(dev_path, op, period_us, quota)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

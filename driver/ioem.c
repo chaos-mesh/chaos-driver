@@ -113,17 +113,29 @@ static struct irl_dispatch_return irl_dispatch(struct irl* irl)
     u64 quota;
 
     read_lock(&irl->lock);
-    counter = atomic64_read(&irl->io_counter);
-    quota = irl->io_quota;
-    while (counter < quota) {
-        if (atomic64_cmpxchg(&irl->io_counter, counter, counter+1) == counter) {
-            break;
-        }
+    if (irl->io_period_us == 0) {
+        // the irl is not enabled
+        ret.dispatch = 1;
+        ret.time_to_send = 0;
+    } else {
+        // the irl is enabled
         counter = atomic64_read(&irl->io_counter);
+        quota = irl->io_quota;
+        while (counter < quota) {
+            if (atomic64_cmpxchg(&irl->io_counter, counter, counter+1) == counter) {
+                break;
+            }
+            counter = atomic64_read(&irl->io_counter);
+        }
+        if (counter < quota) {
+            // 
+            ret.dispatch = 1;
+            ret.time_to_send = 0;
+        } else { 
+            ret.dispatch = 0;
+            ret.time_to_send = ktime_get_ns() + irl->io_period_us * NSEC_PER_USEC;
+        }
     }
-
-    ret.dispatch = 0;
-    ret.time_to_send = ktime_get_ns() + irl->io_period_us * NSEC_PER_USEC;
     read_unlock(&irl->lock);
 
     return ret;
