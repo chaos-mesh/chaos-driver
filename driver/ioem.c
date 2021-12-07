@@ -10,6 +10,7 @@
 #include <linux/ktime.h>
 #include <linux/pid_namespace.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 
 #include "ioem.h"
 #include "comp.h"
