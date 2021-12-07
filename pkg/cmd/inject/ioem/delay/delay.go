@@ -25,6 +25,7 @@ import (
 
 var dev_path string
 var op int
+var pid uint
 var delay, corr int64
 var jitter uint32
 
@@ -37,7 +38,7 @@ var Delay = &cobra.Command{
 			os.Exit(1)
 		}
 
-		id, err := c.InjectIOEMDelay(dev_path, op, delay, corr, jitter)
+		id, err := c.InjectIOEMDelay(dev_path, op, pid, delay, corr, jitter)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -49,11 +50,12 @@ var Delay = &cobra.Command{
 
 func init() {
 	Delay.Flags().IntVar(&op, "op", 0, "operation filter of the injection. 0 for all, 1 for write, 2 for read")
+	Delay.Flags().UintVar(&pid, "pid", 0, "pid namespace filter of the injection. 0 for all, others for the pid namespace of the specified process")
+	Delay.Flags().StringVar(&dev_path, "dev-path", "", "path of the injected device")
 
 	Delay.Flags().Int64Var(&delay, "delay", 0, "delay of the injection")
 	Delay.MarkFlagRequired("delay")
 
 	Delay.Flags().Int64Var(&corr, "corr", 0, "correlation of the randominess of latency")
 	Delay.Flags().Uint32Var(&jitter, "jitter", 0, "jitter of the latency")
-	Delay.Flags().StringVar(&dev_path, "dev-path", "", "path of the injected device")
 }

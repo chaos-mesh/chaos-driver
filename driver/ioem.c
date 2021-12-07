@@ -8,6 +8,8 @@
 #include <linux/list.h>
 #include <linux/random.h>
 #include <linux/ktime.h>
+#include <linux/pid_namespace.h>
+#include <linux/sched.h>
 
 #include "ioem.h"
 #include "comp.h"
@@ -157,12 +159,13 @@ static struct irl_dispatch_return irl_dispatch(struct irl* irl, struct request* 
  */
 struct ioem_priv {
     u64 time_to_send;
-};
+    unsigned int pid_ns;
+}__attribute__((packed));
 
 struct ioem_priv* ioem_priv(struct request *rq)
 {
     // `priv` has two pointers long, is enough to store the `ioem_priv`.
-    return (struct ioem_priv*)(&rq->elv.priv[0]);
+    return (struct ioem_priv*)(&rq->elv);
 }
 
 /**
@@ -471,6 +474,7 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
         list_del_init(&rq->queuelist);
 
         ioem_priv(rq)->time_to_send = ktime_get_ns();
+        ioem_priv(rq)->pid_ns = task_active_pid_ns(current)->ns.inum;
 
         ioem_error_injection(rq);
 
@@ -732,6 +736,46 @@ static struct {
     .ioem_limit = NULL,
 };
 
+static int ioem_get_pid_ns_inode_from_pid(unsigned int pid_nr, unsigned int* out)
+{
+    int ret = 0;
+    struct pid *pid;
+    struct task_struct* task;
+    struct pid_namespace* ns;
+
+    pid = find_vpid(pid_nr);
+    if (pid) {
+        get_pid(pid);
+    } else {
+        ret = ENOENT;
+        goto fail;
+    }
+
+    task = pid_task(pid, PIDTYPE_PID);
+    if (task) {
+        task = get_task_struct(task);
+    } else {
+        ret = ENOENT;
+        goto release_pid;
+    }
+
+    rcu_read_lock();
+
+    ns = task_active_pid_ns(task);
+    if (ns) {
+        *out = ns->ns.inum;
+    } else {
+        ret = ENOENT;
+    }
+
+    rcu_read_unlock();
+    put_task_struct(task);
+release_pid:
+    put_pid(pid);
+fail:
+    return ret;
+}
+
 int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
 {
     int ret = 0;
@@ -748,13 +792,23 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
     INIT_LIST_HEAD(&ioem_injection->list);
     ioem_injection->id = id;
 
-    if (copy_from_user(&ioem_injection->arg, injection->matcher_arg, sizeof(&ioem_injection->arg)))
+    if (copy_from_user(&ioem_injection->arg, injection->matcher_arg, sizeof(ioem_injection->arg)))
     {
         ret = EINVAL;
         goto free_matcher_arg;
     }
 
     ioem_injection->arg.device = new_decode_dev(ioem_injection->arg.device);
+    if (ioem_injection->arg.pid_ns != 0) {
+        unsigned int ns;
+
+        ret = ioem_get_pid_ns_inode_from_pid(ioem_injection->arg.pid_ns, &ns);
+        if (ret > 0) {
+            goto free_matcher_arg;
+        }
+
+        ioem_injection->arg.pid_ns = ns;
+    }
 
     ioem_injection->injector_type = injection->injector_type;
     switch (injection->injector_type)
@@ -848,6 +902,10 @@ static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
 
 static bool ioem_should_inject(struct request* rq, struct ioem_injection* e) {
     if (rq->bio == NULL) {
+        return 0;
+    }
+
+    if (e->arg.pid_ns != 0 && ioem_priv(rq)->pid_ns != e->arg.pid_ns) {
         return 0;
     }
 

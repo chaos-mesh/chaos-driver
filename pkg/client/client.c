@@ -23,12 +23,16 @@ struct ioem_matcher_arg {
     // 1 means write (include write, write_same, write_zeroes)
     // 2 means read
     int op;
+
+    // 0 means to inject all processes
+    unsigned int pid_ns;
 } __attribute__((packed));
 
-static struct ioem_matcher_arg ioem_matcher_arg_new(uint32_t device, int op) {
+static struct ioem_matcher_arg ioem_matcher_arg_new(uint32_t device, int op, unsigned int pid) {
     struct ioem_matcher_arg ret = {
         .device = device,
         .op = op,
+        .pid_ns = pid,
     };
     return ret;
 }
