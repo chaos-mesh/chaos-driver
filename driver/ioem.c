@@ -164,8 +164,9 @@ struct ioem_priv {
 
 struct ioem_priv* ioem_priv(struct request *rq)
 {
+    BUILD_BUG_ON(sizeof(struct ioem_priv) > sizeof(rq->elv));
     // `priv` has two pointers long, is enough to store the `ioem_priv`.
-    return (struct ioem_priv*)(&rq->elv);
+    return (struct ioem_priv*)(&rq->elv.priv[0]);
 }
 
 /**
@@ -643,7 +644,7 @@ static void ioem_sq_merged_requests(struct request_queue *q, struct request *rq,
 {
     struct ioem_data *id = q->elevator->elevator_data;
 
-	ioem_erase_head(id, rq);
+	ioem_erase_head(id, next);
 }
 
 static struct elevator_type ioem_sq = {
@@ -684,7 +685,7 @@ int ioem_register(void)
 
     return 0;
 err:
-    pr_err("ioem: failed to register ioem_mq: %d\n", ret);
+    pr_err("ioem: failed to register ioem: %d\n", ret);
     return ret;
 }
 
