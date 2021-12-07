@@ -16,47 +16,14 @@
 package ioem
 
 import (
-	"fmt"
-	"os"
-
-	"github.com/chaos-mesh/chaos-driver/pkg/client"
+	"github.com/chaos-mesh/chaos-driver/pkg/cmd/inject/ioem/delay"
 	"github.com/spf13/cobra"
 )
 
-var dev_path string
-var op int
-var delay, corr int64
-var jitter uint32
-
 var Ioem = &cobra.Command{
 	Use: "ioem",
-	Run: func(cmd *cobra.Command, args []string) {
-		c, err := client.New()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-
-		id, err := c.InjectIOEMDelay(dev_path, op, delay, corr, jitter)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-
-		fmt.Printf("Injected: %d\n", id)
-	},
 }
 
 func init() {
-	Ioem.Flags().IntVar(&op, "op", 0, "operation filter of the injection. 0 for all, 1 for write, 2 for read")
-	Ioem.MarkFlagRequired("op")
-
-	Ioem.Flags().Int64Var(&delay, "delay", 0, "delay of the injection")
-	Ioem.MarkFlagRequired("delay")
-
-	Ioem.Flags().Int64Var(&corr, "corr", 0, "correlation of the randominess of latency")
-	Ioem.Flags().Uint32Var(&jitter, "jitter", 0, "jitter of the latency")
-
-	Ioem.Flags().StringVar(&dev_path, "dev_path", "", "path of the injected device")
-	Ioem.MarkFlagRequired("dev_path")
+	Ioem.AddCommand(delay.Delay)
 }

@@ -12,10 +12,10 @@
 
 struct chaos_injection
 {
-    __u32 matcher_type;
+    u32 matcher_type;
     void __user *matcher_arg;
 
-    __u32 injector_type;
+    u32 injector_type;
     void __user *injector_arg;
 } __attribute__((packed));
 

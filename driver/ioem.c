@@ -12,79 +12,132 @@
 #include "ioem.h"
 #include "comp.h"
 
-void ioem_error_injection(struct request* rq);
-
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
 
-
-struct ioem_request_limit {
-    atomic64_t io_period_us;
-    atomic64_t io_quota_us;
+/**
+ * struct irl - request limit
+ * @lock: The lock protects the config
+ * @io_period_us: The period to reset the counter (in us)
+ * @io_quota: The quota of dispatching request
+ * @io_counter: The counter of all io requests in one period
+ * @last_expire_time: The last time when the counter is reset
+ * @timer: The hrtimer to reset the counter according to io_period_use
+ *
+ * Every device (request_queue) should have one `irl`. This struct can be used
+ * to implement the limit of IOPS
+ */
+struct irl {
+    rwlock_t lock;
+    u64 io_period_us;
+    u64 io_quota;
 
     atomic64_t io_counter;
     atomic64_t last_expire_time;
     struct hrtimer timer;
 };
 
-static void ioem_request_limit_change(struct ioem_request_limit* counter, u64 io_period_us, u64 io_quota_us)
-{
-    atomic64_set(&counter->io_period_us, io_period_us);
-    atomic64_set(&counter->io_quota_us, io_quota_us);
+void ioem_error_injection(struct irl* irl, struct request* rq);
 
-    if (io_period_us > 0) {
+/**
+ * irl_change() - change the config of irl
+ * @counter: The corresponding irl struct
+ * @io_period_us: The period of irl
+ * @io_quota: The quota of irl
+ */
+static void irl_change(struct irl* counter, u64 io_period_us, u64 io_quota)
+{
+    write_lock(&counter->lock);
+
+    counter->io_quota = io_quota;
+    if (counter->io_period_us == 0) {
         hrtimer_start(&counter->timer, io_period_us * NSEC_PER_USEC, HRTIMER_MODE_ABS_PINNED);
     } else {
         hrtimer_cancel(&counter->timer);
     }
+    counter->io_period_us = io_period_us;
+
+    write_unlock(&counter->lock);
 }
 
-static enum hrtimer_restart ioem_request_limit_timer_callback(struct hrtimer * timer)
+static enum hrtimer_restart irl_timer_callback(struct hrtimer * timer)
 {
+    enum hrtimer_restart ret;
     u64 period_us = 0;
 
-    struct ioem_request_limit* counter = container_of(timer, struct ioem_request_limit, timer);
+    struct irl* counter = container_of(timer, struct irl, timer);
 
-    atomic64_set(&counter->io_counter, 0);
     atomic64_set(&counter->last_expire_time, timer->base->get_time());
+    atomic64_set(&counter->io_counter, 0);
 
-    period_us = atomic64_read(&counter->io_period_us);
+    read_lock(&counter->lock);
+    period_us = counter->io_period_us;
     if (period_us > 0) {
         hrtimer_forward_now(timer, period_us * NSEC_PER_USEC);
-        return HRTIMER_RESTART;
+        ret = HRTIMER_RESTART;
     } else {
-        return HRTIMER_NORESTART;
+        ret = HRTIMER_NORESTART;
     }
+    read_unlock(&counter->lock);
+
+    return ret;
 }
 
-static void ioem_request_limit_init(struct ioem_request_limit* counter)
+static void irl_init(struct irl* counter)
 {
+    rwlock_init(&counter->lock);
     hrtimer_init(&counter->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
-    counter->timer.function = ioem_request_limit_timer_callback;
+    counter->timer.function = irl_timer_callback;
 }
 
-struct ioem_request_limit_dispatch_return {
+struct irl_dispatch_return {
     bool dispatch;
     u64 time_to_send;
 };
 
-static struct ioem_request_limit_dispatch_return ioem_request_limit_dispatch(struct ioem_request_limit* counter)
+/**
+ * irl_dispatch() - change the config of irl
+ * @irl: The corresponding irl struct
+ *
+ * This function will increase the counter inside the irl. If the counter exceed
+ * the quota, it will return `{0, time_to_send}`. Tthe `time_to_send` is the
+ * next time to reset quota, which is `last_expire_time + period` (in absolute
+ * ns)
+ *
+ * If the counter didn't exceed the quota, it will return `{1, 0}`
+ */
+static struct irl_dispatch_return irl_dispatch(struct irl* irl)
 {
-    struct ioem_request_limit_dispatch_return ret;
+    struct irl_dispatch_return ret;
+    u64 counter;
+    u64 quota;
 
-    // The usage of `atomic64` is somehow wrong: multiple `atomic_read` doesn't
-    // come from the same snapshot, but the wrong value can be tolerated.
-    if (atomic64_fetch_inc(&counter->io_counter) < atomic64_read(&counter->io_quota_us)) {
-        ret.dispatch = 1;
-        ret.time_to_send = 0;
-        return ret;
+    read_lock(&irl->lock);
+    counter = atomic64_read(&irl->io_counter);
+    quota = irl->io_quota;
+    while (counter < quota) {
+        if (atomic64_cmpxchg(&irl->io_counter, counter, counter+1) == counter) {
+            break;
+        }
+        counter = atomic64_read(&irl->io_counter);
     }
 
     ret.dispatch = 0;
-    ret.time_to_send = ktime_get_ns() + atomic64_read(&counter->io_period_us) * NSEC_PER_USEC;
+    ret.time_to_send = ktime_get_ns() + irl->io_period_us * NSEC_PER_USEC;
+    read_unlock(&irl->lock);
+
     return ret;
 }
 
+/**
+ * struct ioem_priv - The priv data stored in request 
+ * @time_to_send: The expected sending time of the request
+ *
+ * The expected sending time is calculated when this request comes into the
+ * scheduler, then it will be stored in the `struct ioem_priv`. This struct
+ * shouldn't be longer than three pointers, as the `rq->elv` only have three
+ * pointers long.
+ */
 struct ioem_priv {
     u64 time_to_send;
 };
@@ -95,14 +148,33 @@ struct ioem_priv* ioem_priv(struct request *rq)
     return (struct ioem_priv*)(&rq->elv.priv[0]);
 }
 
+/**
+ * struct ioem_data - the main data of ioem
+ * @root: The rb tree root, which is sorted according to `time_to_send`
+ * @lock: The spinlock of the whole structure
+ * @timer: The timer used to trigger the dispatch after reaching the
+ * `time_to_send`.
+ * @next_expires: Record the next time when the timer will expire.
+ * @irl: The pointer to irl. It doesn't need to have the `irl`, which means the
+ * `irl` may be allocated and stored in other structure, and this is only a
+ * reference.
+ * @hctx: For blk-mq, this is a pointer to hardward queue.
+ * @q: Only for blk-sq, this is a pointer to the software request queue.
+ * @unplug_work: Only for blk-sq, this is a `kblockd work_struct` to trigger the
+ * dispatch.
+ *
+ * This sturcture holds all structure that is needed to inject errors. In
+ * blk-mq, this struct is allocated per `hctx` and held by `hctx`. In blk-sq,
+ * this struct is only allocated per `request_queue`.
+ */
 struct ioem_data {
     struct rb_root root;
     spinlock_t lock;
 
     struct hrtimer timer;
-    u64 last_expires;
+    u64 next_expires;
 
-    struct ioem_request_limit* irl;
+    struct irl* irl;
 
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
     struct blk_mq_hw_ctx* hctx;
@@ -114,6 +186,14 @@ struct ioem_data {
     #endif
 };
 
+/**
+ * ioem_erase_head() - remove the request from ioem data
+ * @data: The `ioem_data` structure
+ * @rq: The request.
+ *
+ * This function will remove the reqeust from ioem data, and will also
+ * reinitialize the `rb_node` and `list_node` inside the request.
+ */
 static void ioem_erase_head(struct ioem_data *data, struct request *rq)
 {
     rb_erase(&rq->rb_node, &data->root);
@@ -121,6 +201,10 @@ static void ioem_erase_head(struct ioem_data *data, struct request *rq)
     INIT_LIST_HEAD(&rq->queuelist);
 }
 
+/**
+ * ioem_peek_request() - peek the first request inside ioem
+ * @data: The `ioem_data` strucutre
+ */
 static struct request* ioem_peek_request(struct ioem_data *data)
 {
     struct request* ioem_rq = rq_rb_first(&data->root);
@@ -128,18 +212,39 @@ static struct request* ioem_peek_request(struct ioem_data *data)
     return ioem_rq;
 }
 
-static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*function)(struct hrtimer *), struct ioem_request_limit* irl)
+/**
+ * ioem_data_init() - initialize the `ioem_data` structure
+ * @data:  The `ioem_data` strucutre 
+ * @function: The callback function of `data->timer`. It is a variable to be
+ * compatible with multiple kernel versions.
+ * @irl: The pointer to irl.
+ *
+ * In blk-mq situation, the irl is allocated per `request_queue`, and the
+ * `ioem_data` is allocated per `hctx`, so it only needs to set a pointer to the
+ * `irl`.
+ *
+ * Be careful that the `ioem_data` should not be touched after the `irl` is
+ * freed.
+ */
+static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*function)(struct hrtimer *), struct irl* irl)
 {
     hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
 
     spin_lock_init(&data->lock);
     data->root = RB_ROOT;
     data->timer.function = function;
-    data->last_expires = 0;
+    data->next_expires = 0;
 
     data->irl = irl;
 }
 
+/**
+ * ioem_enqueue() - insert a request into the data 
+ * @data: The `ioem_data` strucutre 
+ * @rq: The request 
+ *
+ * The request will be inserted into the rb tree
+ */
 static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 {
     struct rb_node **p = &data->root.rb_node, *parent = NULL;
@@ -160,6 +265,18 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
     rb_insert_color(&rq->rb_node, &data->root);
 }
 
+/**
+ * ioem_dequeue() - pop the first request whose `time_to_send` is earlier than
+ * now.
+ * @data: The `ioem_data` structure
+ *
+ * If the first request's `time_to_send` is earlier than now, and the quota in
+ * `irl` doesn't exceeded, it will be returned and removed from the `ioem_data`.
+ *
+ * If the quota exceeded or the `time_to_send` is later than now, the hrtimer
+ * will be used to trigger the next dispatch when it's possible to dispatch this
+ * request.
+ */
 static struct request* ioem_dequeue(struct ioem_data *data)
 {
     u64 now, time_to_send;
@@ -172,8 +289,8 @@ static struct request* ioem_dequeue(struct ioem_data *data)
         time_to_send = ioem_priv(rq)->time_to_send;
 
         if (time_to_send <= now) {
-            struct ioem_request_limit_dispatch_return irl_ret;
-            irl_ret = ioem_request_limit_dispatch(data->irl);
+            struct irl_dispatch_return irl_ret;
+            irl_ret = irl_dispatch(data->irl);
             if (irl_ret.dispatch > 0) {
                 ioem_erase_head(data, rq);
             } else {
@@ -190,18 +307,47 @@ static struct request* ioem_dequeue(struct ioem_data *data)
     }
 
     if (hrtimer_is_queued(&data->timer)) {
-        if (data->last_expires <= time_to_send) {
+        if (data->next_expires <= time_to_send) {
             return NULL;
         }
     }
 
-    data->last_expires = time_to_send;
+    data->next_expires = time_to_send;
     hrtimer_start(&data->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS_PINNED);
 
     return NULL;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+
+// ioem in blk-mq
+//
+// Every block device has one `request_queue` and multiple `hctx`. The
+// `ioem_data` is allocated per `hctx` to increase to performance, but the `irl`
+// is only allocataed for the `request_queue` to count the requests on the whole
+// device (but not one `hctx`)
+//
+// The dispatch is triggered by hardward, schedule logic or other things. The
+// direct way to trigger a dispatch is to call `blk_mq_run_hw_queue`. This
+// function will trigger a dispatch on one `hctx`, if the `ioem_data` is not
+// empty.
+
+//             ┌─────────────┐
+//             │REQUEST_QUEUE│
+//             └─────┬───────┘
+//                   │
+//                 ┌─▼─┐
+//      ┌──────────►IRL◄──────────┐
+//      │          └─▲─┘          │
+//      │            │            │
+// ┌────┴────┐  ┌────┴────┐  ┌────┴────┐
+// │IOEM_DATA│  │IOEM_DATA│  │IOEM_DATA│
+// └────▲────┘  └────▲────┘  └────▲────┘
+//      │            │            │
+//   ┌──┴──┐      ┌──┴──┐      ┌──┴──┐
+//   │HCTX │      │HCTX │      │HCTX │
+//   └─────┘      └─────┘      └─────┘
+
 
 static enum hrtimer_restart ioem_mq_timer(struct hrtimer * timer)
 {
@@ -216,7 +362,7 @@ static enum hrtimer_restart ioem_mq_timer(struct hrtimer * timer)
 static int ioem_mq_init_sched(struct request_queue *q, struct elevator_type *e)
 {
     struct elevator_queue *eq;
-    struct ioem_request_limit *irl;
+    struct irl *irl;
 
     eq = elevator_alloc(q, e);
     if (!eq)
@@ -227,7 +373,7 @@ static int ioem_mq_init_sched(struct request_queue *q, struct elevator_type *e)
 		kobject_put(&eq->kobj);
 		return -ENOMEM;
 	}
-    ioem_request_limit_init(irl);
+    irl_init(irl);
 
     eq->elevator_data = irl;
     q->elevator = eq;
@@ -237,7 +383,7 @@ static int ioem_mq_init_sched(struct request_queue *q, struct elevator_type *e)
 
 static void ioem_mq_exit_sched(struct elevator_queue *e)
 {
-    struct ioem_request_limit *irl = e->elevator_data;
+    struct irl *irl = e->elevator_data;
     hrtimer_cancel(&irl->timer);
     kfree(irl);
 }
@@ -298,7 +444,7 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
 
         ioem_priv(rq)->time_to_send = ktime_get_ns();
 
-        ioem_error_injection(rq);
+        ioem_error_injection(id->irl, rq);
 
         ioem_enqueue(id, rq);
 
@@ -343,6 +489,27 @@ static struct elevator_type ioem_mq = {
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
 
+// ioem in blk-sq
+//
+// Every block device will have one `request_queue`, and the `ioem_data` and
+// `irl` is allocated for it.
+//
+// The dispatch can be triggered by calling the `__blk_run_queue` function. This
+// function is always synchronous, so we need to schedule it through `kblockd`
+// to avoid deadlock.
+//
+// As the running context is protected by the lock inside the `request_queue`,
+// there is no need to lock the `spinlock` inside the `ioem_data`.
+
+//  ┌─────────────┐
+//  │REQUEST_QUEUE│
+//  └────┬───────┬┘
+//       │       │
+//       │       │
+//  ┌────▼────┐ ┌▼──┐
+//  │IOEM_DATA├─►IRL│
+//  └─────────┘ └───┘
+
 static void ioem_sq_kick_queue(struct work_struct *work)
 {
 	struct ioem_data *id =
@@ -371,7 +538,7 @@ static int ioem_sq_init_sched(struct request_queue *q, struct elevator_type *e)
 {
     struct elevator_queue *eq;
     struct ioem_data *id;
-    struct ioem_request_limit *irl;
+    struct irl *irl;
 
     eq = elevator_alloc(q, e);
     if (!eq)
@@ -382,7 +549,7 @@ static int ioem_sq_init_sched(struct request_queue *q, struct elevator_type *e)
 		kobject_put(&eq->kobj);
 		return -ENOMEM;
 	}
-    ioem_request_limit_init(irl);
+    irl_init(irl);
 
     id = kzalloc_node(sizeof(*id), GFP_KERNEL, q->node);
     if (!id) {
@@ -418,7 +585,7 @@ static void ioem_sq_insert_request(struct request_queue *q, struct request *rq)
     struct ioem_data *id = q->elevator->elevator_data;
 
     ioem_priv(rq)->time_to_send = ktime_get_ns();
-    ioem_error_injection(rq);
+    ioem_error_injection(id->irl, rq);
 
     ioem_enqueue(id, rq);
 
@@ -506,12 +673,23 @@ struct ioem_injection {
 
     struct ioem_matcher_arg arg;
 
-    s64 delay;
-    s64 delay_jitter;
-    struct crndstate {
-        u32 last;
-        u32 rho;
-    } delay_cor;
+    u32 injector_type;
+    union {
+        struct {
+            s64 delay;
+            s64 delay_jitter;
+            struct crndstate {
+                u32 last;
+                u32 rho;
+            } delay_cor;
+        } delay;
+
+        struct {
+            u64 period_us;
+            u64 quota;
+            atomic_t injected;
+        } limit;
+    };
 };
 
 LIST_HEAD(ioem_injection_list);
@@ -522,6 +700,7 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
     int ret = 0;
     struct ioem_injection* ioem_injection;
     struct ioem_injector_delay_arg delay_arg;
+    struct ioem_injector_limit_arg limit_arg;
 
     ioem_injection = kmalloc(sizeof(*ioem_injection), GFP_KERNEL);
     if (ioem_injection == NULL)
@@ -548,9 +727,20 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
             ret = EINVAL;
             goto free_matcher_arg;
         }
-        ioem_injection->delay = delay_arg.delay;
-        ioem_injection->delay_jitter = delay_arg.jitter;
-        ioem_injection->delay_cor.rho = delay_arg.corr;
+        ioem_injection->delay.delay = delay_arg.delay;
+        ioem_injection->delay.delay_jitter = delay_arg.jitter;
+        ioem_injection->delay.delay_cor.rho = delay_arg.corr;
+
+        break;
+    case IOEM_INJECTOR_TYPE_LIMIT:
+        if (copy_from_user(&limit_arg, injection->injector_arg, sizeof(limit_arg)))
+        {
+            ret = EINVAL;
+            goto free_matcher_arg;
+        }
+        ioem_injection->limit.period_us = limit_arg.period_us;
+        ioem_injection->limit.quota = limit_arg.quota;
+        ioem_injection->limit.injected.counter = 0;
 
         break;
     default:
@@ -614,7 +804,7 @@ static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
     return ((rnd % (2 * (u32)jitter)) + mu) - jitter;
 }
 
-void ioem_error_injection(struct request* rq)
+void ioem_error_injection(struct irl* irl, struct request* rq)
 {
     struct ioem_injection* e;
     u64 delay = 0;
@@ -642,11 +832,22 @@ void ioem_error_injection(struct request* rq)
             }
         }
 
-        delay += ioem_random(e->delay, e->delay_jitter, &e->delay_cor);
+        switch (e->injector_type)
+        {
+        case IOEM_INJECTOR_TYPE_DELAY:
+            delay += ioem_random(e->delay.delay, e->delay.delay_jitter, &e->delay.delay_cor);
+            break;
+        case IOEM_INJECTOR_TYPE_LIMIT:
+            if (atomic_cmpxchg(&e->limit.injected, 0, 1) == 0) {
+                irl_change(irl, e->limit.period_us, e->limit.quota);
+            }
+        default:
+            break;
+        }
     }
 
     read_unlock(&ioem_injection_list_lock);
 
-    ioem_priv(rq)->time_to_send =  ktime_get_ns() + delay;
+    ioem_priv(rq)->time_to_send += delay;
     return;
 }

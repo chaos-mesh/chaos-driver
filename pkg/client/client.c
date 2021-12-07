@@ -49,6 +49,20 @@ static struct ioem_injector_delay_arg ioem_injector_delay_arg_new(int64_t delay,
     return ret;
 }
 
+struct ioem_injector_limit_arg {
+    uint64_t period_us;
+    uint64_t quota;
+} __attribute__((packed));
+
+static struct ioem_injector_limit_arg ioem_injector_limit_arg_new(uint64_t period_us, uint64_t quota) {
+    struct ioem_injector_limit_arg ret = {
+        .period_us = period_us,
+        .quota = quota,
+    };
+
+    return ret;
+}
+
 struct chaos_injection
 {
     uint32_t matcher_type;

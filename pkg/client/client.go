@@ -20,7 +20,6 @@ import "C"
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"syscall"
 	"unsafe"
@@ -72,10 +71,35 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, delay int64, jitter int
 	}
 
 	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op))
-	fmt.Printf("setting delay: %d\n", delay)
 	delay_arg := C.ioem_injector_delay_arg_new(C.int64_t(delay), C.int64_t(jitter), C.uint32_t(corr))
 
 	id := C.add_injection(C.int(c.fd), 0, unsafe.Pointer(&ioem_injection), 0, unsafe.Pointer(&delay_arg))
+	if id < 0 {
+		return 0, syscall.Errno(-id)
+	}
+
+	return int(id), nil
+}
+
+func (c *Client) InjectIOEMLimit(devPath string, op int, period_us uint64, quota uint64) (int, error) {
+	dev := C.uint32_t(0)
+	if len(devPath) > 0 {
+		info, err := os.Stat(devPath)
+		if err != nil {
+			return 0, err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0, ErrFailToGetStat
+		}
+
+		dev = C.uint32_t(stat.Rdev)
+	}
+
+	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op))
+	limit_arg := C.ioem_injector_limit_arg_new(C.uint64_t(period_us), C.uint64_t(quota))
+
+	id := C.add_injection(C.int(c.fd), 0, unsafe.Pointer(&ioem_injection), 1, unsafe.Pointer(&limit_arg))
 	if id < 0 {
 		return 0, syscall.Errno(-id)
 	}
