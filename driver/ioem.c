@@ -19,9 +19,55 @@
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
 
 static void ioem_error_injection(struct request* rq);
-static bool ioem_limit_should_affect(struct request* rq);
 
 #define IOEM_MQ_ENABLED ((LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)) || (defined RHEL_MAJOR && RHEL_MAJOR >= 7 && defined RHEL_MINOR && RHEL_MINOR >= 2))
+
+/**
+ * struct ioem_data - the main data of ioem
+ * @root: The rb tree root, which is sorted according to `time_to_send`
+ * @lock: The spinlock of the whole structure
+ * @timer: The timer used to trigger the dispatch after reaching the
+ * `time_to_send`.
+ * @next_expires: Record the next time when the timer will expire.
+ * @irl: The pointer to irl. It doesn't need to have the `irl`, which means the
+ * `irl` may be allocated and stored in other structure, and this is only a
+ * reference.
+ * @ioem_injection_version: Mark of the synced version of injection version. If
+ * the version is smaller than the global `ioem_injection_version`, then it
+ * needs to sync the config to irl
+ * @hctx: For blk-mq, this is a pointer to hardward queue.
+ * @q: Only for blk-sq, this is a pointer to the software request queue.
+ * @unplug_work: Only for blk-sq, this is a `kblockd work_struct` to trigger the
+ * dispatch.
+ * @ioem_limit: The only one valid IOPS limit ioem_injection.
+ *
+ * This sturcture holds all structure that is needed to inject errors. In
+ * blk-mq, this struct is allocated per `hctx` and held by `hctx`. In blk-sq,
+ * this struct is only allocated per `request_queue`.
+ */
+struct ioem_data {
+    struct rb_root root;
+    spinlock_t lock;
+
+    struct hrtimer timer;
+    u64 next_expires;
+
+    struct irl* irl;
+    struct ioem_injection* ioem_limit;
+
+    u32 ioem_injection_version;
+
+    #if IOEM_MQ_ENABLED
+    struct blk_mq_hw_ctx* hctx;
+    #endif
+
+    #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
+    struct request_queue* q;
+    struct work_struct unplug_work;
+    #endif
+};
+
+static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq);
 
 /**
  * struct irl - request limit
@@ -102,7 +148,7 @@ struct irl_dispatch_return {
 
 /**
  * irl_dispatch() - change the config of irl
- * @irl: The corresponding irl struct
+ * @data: The corresponding ioem_data struct
  * @rq: The request to be dispatch
  *
  * This function will increase the counter inside the irl. If the counter exceed
@@ -112,8 +158,9 @@ struct irl_dispatch_return {
  *
  * If the counter didn't exceed the quota, it will return `{1, 0}`
  */
-static struct irl_dispatch_return irl_dispatch(struct irl* irl, struct request* rq)
+static struct irl_dispatch_return irl_dispatch(struct ioem_data* data, struct request* rq)
 {
+    struct irl* irl = data->irl;
     struct irl_dispatch_return ret;
     u64 counter;
     u64 quota;
@@ -122,7 +169,7 @@ static struct irl_dispatch_return irl_dispatch(struct irl* irl, struct request* 
     read_lock(&irl->lock);
 
     period = atomic64_read(&irl->io_period_us);
-    if (period == 0 || !ioem_limit_should_affect(rq)) {
+    if (period == 0 || !ioem_limit_should_affect(data, rq)) {
         // the irl is not enabled
         ret.dispatch = 1;
         ret.time_to_send = 0;
@@ -171,49 +218,6 @@ struct ioem_priv* ioem_priv(struct request *rq)
     // `priv` has two pointers long, is enough to store the `ioem_priv`.
     return (struct ioem_priv*)(&rq->elv.priv[0]);
 }
-
-/**
- * struct ioem_data - the main data of ioem
- * @root: The rb tree root, which is sorted according to `time_to_send`
- * @lock: The spinlock of the whole structure
- * @timer: The timer used to trigger the dispatch after reaching the
- * `time_to_send`.
- * @next_expires: Record the next time when the timer will expire.
- * @irl: The pointer to irl. It doesn't need to have the `irl`, which means the
- * `irl` may be allocated and stored in other structure, and this is only a
- * reference.
- * @ioem_injection_version: Mark of the synced version of injection version. If
- * the version is smaller than the global `ioem_injection_version`, then it
- * needs to sync the config to irl
- * @hctx: For blk-mq, this is a pointer to hardward queue.
- * @q: Only for blk-sq, this is a pointer to the software request queue.
- * @unplug_work: Only for blk-sq, this is a `kblockd work_struct` to trigger the
- * dispatch.
- *
- * This sturcture holds all structure that is needed to inject errors. In
- * blk-mq, this struct is allocated per `hctx` and held by `hctx`. In blk-sq,
- * this struct is only allocated per `request_queue`.
- */
-struct ioem_data {
-    struct rb_root root;
-    spinlock_t lock;
-
-    struct hrtimer timer;
-    u64 next_expires;
-
-    struct irl* irl;
-
-    u32 ioem_injection_version;
-
-    #if IOEM_MQ_ENABLED
-    struct blk_mq_hw_ctx* hctx;
-    #endif
-
-    #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
-    struct request_queue* q;
-    struct work_struct unplug_work;
-    #endif
-};
 
 static void ioem_data_sync_with_injections(struct ioem_data* data);
 
@@ -324,7 +328,7 @@ static struct request* ioem_dequeue(struct ioem_data *data)
 
     if (time_to_send <= now) {
         struct irl_dispatch_return irl_ret;
-        irl_ret = irl_dispatch(data->irl, rq);
+        irl_ret = irl_dispatch(data, rq);
         if (irl_ret.dispatch > 0) {
             ioem_erase_head(data, rq);
         } else {
@@ -781,12 +785,10 @@ static struct {
     rwlock_t lock;
     struct list_head list;
     atomic_t version;
-    struct ioem_injection* ioem_limit;
 } ioem_injections = {
     .list = LIST_HEAD_INIT(ioem_injections.list),
     .lock = __RW_LOCK_UNLOCKED(ioem_injections.lock),
     .version = ATOMIC_INIT(0),
-    .ioem_limit = NULL,
 };
 
 static int ioem_get_pid_ns_inode_from_pid(unsigned int pid_nr, unsigned int* out)
@@ -1007,40 +1009,45 @@ static void ioem_error_injection(struct request* rq)
     return;
 }
 
-static bool ioem_limit_should_affect(struct request* rq)
+static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq)
 {
     bool should_affect;
 
     read_lock(&ioem_injections.lock);
-    should_affect = ioem_should_inject(rq, ioem_injections.ioem_limit);
+    should_affect = ioem_should_inject(rq, data->ioem_limit);
     read_unlock(&ioem_injections.lock);
 
     return should_affect;
 }
 
+/**
+ * ioem_data_sync_with_injections() - sync ioem_limit and irl with the
+ * injections
+ * @data: the ioem_data to sync
+ *
+ * This functions is called when a request is being inserted. It will check the
+ * version of the injection list and if it is greater than the verion recorded
+ * inside the data, it will update the irl and the `ioem_limit` field of data.
+ */
 static void ioem_data_sync_with_injections(struct ioem_data* data)
 {
     struct ioem_injection* e;
     u32 version = atomic_read(&ioem_injections.version);
 
     if (version > data->ioem_injection_version) {
-        write_lock(&ioem_injections.lock);
-
         irl_change(data->irl, 0, 0);
-        ioem_injections.ioem_limit = NULL;
+        data->ioem_limit = NULL;
 
         list_for_each_entry(e, &ioem_injections.list, list)
         {
             if (e->injector_type == IOEM_INJECTOR_TYPE_LIMIT) {
                 irl_change(data->irl, e->limit.period_us, e->limit.quota);
-                ioem_injections.ioem_limit = e;
+                data->ioem_limit = e;
                 // multiple limit is not supported
                 break;
             }
         }
 
         data->ioem_injection_version = atomic_read(&ioem_injections.version);
-
-        write_unlock(&ioem_injections.lock);
     }
 }

@@ -61,9 +61,11 @@ Injecting too much delay on the root device could make your system blocked. Plea
 ### Function
 
 - [x] Inject latency
-- [ ] Traffic controll of IO
+- [x] Traffic controll of IO
 
 ### Test 
+
+#### Compatiblity
 
 - [x] Linux 5.12
 - [x] Linux 5.4 (Ubuntu 20.04 latest kernel)
@@ -71,6 +73,13 @@ Injecting too much delay on the root device could make your system blocked. Plea
 - [x] Linux 4.15 (Ubuntu 18.04)
 - [x] Linux 3.10 (CentOS 7.9)
 - [ ] Linux 3.10 (CentOS 7.2)
+
+#### Function test
+
+- [ ] Inject Latency
+    - [x] Basic function
+    - [ ] Correlation and jitter
+- [x] Traffic controll of IO
 
 ### Integrate with Chaos Mesh
 
