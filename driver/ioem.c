@@ -81,8 +81,6 @@ static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq)
  * Every device (request_queue) should have one `irl`. This struct can be used
  * to implement the limit of IOPS
  *
- * Before getting the write lock of `irl`, please cancel the `hrtimer` to avoid
- * deadlock.
  */
 struct irl {
     rwlock_t lock;
@@ -956,7 +954,7 @@ static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
 }
 
 static bool ioem_should_inject(struct request* rq, struct ioem_injection* e) {
-    if (rq->bio == NULL) {
+    if (rq->bio == NULL || e == NULL) {
         return 0;
     }
 
