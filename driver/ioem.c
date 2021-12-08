@@ -21,6 +21,8 @@
 static void ioem_error_injection(struct request* rq);
 static bool ioem_limit_should_affect(struct request* rq);
 
+#define IOEM_MQ_ENABLED ((LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)) || (defined RHEL_MAJOR && RHEL_MAJOR >= 7 && defined RHEL_MINOR && RHEL_MINOR >= 2))
+
 /**
  * struct irl - request limit
  * @lock: The lock protects the config
@@ -203,7 +205,7 @@ struct ioem_data {
 
     u32 ioem_injection_version;
 
-    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+    #if IOEM_MQ_ENABLED
     struct blk_mq_hw_ctx* hctx;
     #endif
 
@@ -349,7 +351,7 @@ static struct request* ioem_dequeue(struct ioem_data *data)
     return NULL;
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+#if IOEM_MQ_ENABLED
 
 // ioem in blk-mq
 //
@@ -499,6 +501,9 @@ static bool ioem_mq_has_work(struct blk_mq_hw_ctx * hctx)
     return has_work;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
+// the following codes are only used to register mq elevator for normal linux >= 4.0
+
 static struct elevator_type ioem_mq = {
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0))
     .ops = {
@@ -518,6 +523,43 @@ static struct elevator_type ioem_mq = {
     .elevator_name = "ioem-mq",
     .elevator_owner = THIS_MODULE,
 };
+
+#else
+
+static struct elevator_mq_ops ioem_mq_ops = {
+    .init_sched = ioem_mq_init_sched,
+    .exit_sched = ioem_mq_exit_sched,
+    .init_hctx = ioem_mq_init_hctx,
+    .exit_hctx = ioem_mq_exit_hctx,
+
+    .insert_requests = ioem_mq_insert_requests,
+    .dispatch_request = ioem_mq_dispatch_request,
+    .has_work = ioem_mq_has_work,
+};
+
+static struct elevator_type ioem_mq = {
+    .elevator_name = "ioem-mq",
+    .elevator_owner = THIS_MODULE,
+};
+
+struct elevator_type_aux *elevator_aux_find(struct elevator_type *e);
+
+static int ioem_mq_rhel_init(void)
+{
+    int ret = elv_register(&ioem_mq);
+    struct elevator_type_aux *aux;
+
+    if (ret)
+        return ret;
+    
+    aux = elevator_aux_find(&ioem_mq);
+    memcpy(&aux->ops.mq, &ioem_mq_ops, sizeof(struct elevator_mq_ops));
+    aux->uses_mq = true;
+
+    return 0;
+}
+
+#endif
 
 #endif
 
@@ -670,11 +712,20 @@ int ioem_register(void)
 {
     int ret = 0;
 
+    #if IOEM_MQ_ENABLED
+
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
     ret = elv_register(&ioem_mq);
     if (ret != 0) {
         goto err;
     }
+    #else
+    ret = ioem_mq_rhel_init();
+    if (ret != 0) {
+        goto err;
+    }
+    #endif
+
     #endif
 
     #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))
@@ -692,7 +743,7 @@ err:
 
 void ioem_unregister(void)
 {
-    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+    #if IOEM_MQ_ENABLED
     elv_unregister(&ioem_mq);
     #endif
 
