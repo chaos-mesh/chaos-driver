@@ -761,6 +761,8 @@ struct ioem_injection {
 
     struct ioem_matcher_arg arg;
 
+    struct kref refcount;
+
     u32 injector_type;
     union {
         struct {
@@ -778,6 +780,14 @@ struct ioem_injection {
         } limit;
     };
 };
+
+void ioem_injection_release(struct kref *ref)
+{
+    struct ioem_injection *inj = container_of(ref, struct ioem_injection, refcount);
+
+    list_del(&inj->list);
+    kfree(inj);
+}
 
 static struct {
     rwlock_t lock;
@@ -841,6 +851,7 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
     {
         return ENOMEM;
     }
+    kref_init(&ioem_injection->refcount);
 
     INIT_LIST_HEAD(&ioem_injection->list);
     ioem_injection->id = id;
@@ -901,7 +912,7 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
     return ret;
 
 free_matcher_arg:
-    kfree(ioem_injection);
+    kref_put(&ioem_injection->refcount, ioem_injection_release);
 
     return ret;
 }
@@ -916,7 +927,7 @@ int ioem_del(unsigned long id) {
         if ( e->id == id )
         {
             list_del(&e->list);
-            kfree(e);
+            kref_put(&e->refcount, ioem_injection_release);
         }
     }
 
@@ -1026,6 +1037,9 @@ static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq)
  * This functions is called when a request is being inserted. It will check the
  * version of the injection list and if it is greater than the verion recorded
  * inside the data, it will update the irl and the `ioem_limit` field of data.
+ *
+ * While calling this function, the data should have been locked, and the
+ * injection list should haven't been locked.
  */
 static void ioem_data_sync_with_injections(struct ioem_data* data)
 {
@@ -1034,18 +1048,25 @@ static void ioem_data_sync_with_injections(struct ioem_data* data)
 
     if (version > data->ioem_injection_version) {
         irl_change(data->irl, 0, 0);
+        if (data->ioem_limit != NULL) {
+            kref_put(&data->ioem_limit->refcount, ioem_injection_release);
+        }
         data->ioem_limit = NULL;
+
+        read_lock(&ioem_injections.lock);
 
         list_for_each_entry(e, &ioem_injections.list, list)
         {
             if (e->injector_type == IOEM_INJECTOR_TYPE_LIMIT) {
                 irl_change(data->irl, e->limit.period_us, e->limit.quota);
+                kref_get(&e->refcount);
                 data->ioem_limit = e;
                 // multiple limit is not supported
                 break;
             }
         }
-
         data->ioem_injection_version = atomic_read(&ioem_injections.version);
+
+        read_unlock(&ioem_injections.lock);
     }
 }
