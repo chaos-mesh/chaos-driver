@@ -50,7 +50,7 @@ Jobs: 16 (f=16): [r(16)][10.8%][r=55.5MiB/s,w=0KiB/s][r=14.2k,w=0 IOPS][eta 01m:
 
 #### Note
 
-1. multi-queue scheduler is only supported on the kernel newer than 4.0, or the rhel kernel released after RHEL 7.2
+1. multi-queue scheduler registration is only supported on the kernel newer than 4.0, or the rhel kernel released after RHEL 7.6
 
 ## Warning
 

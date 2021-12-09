@@ -20,7 +20,7 @@
 
 static void ioem_error_injection(struct request* rq);
 
-#define IOEM_MQ_ENABLED ((LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)) || (defined RHEL_MAJOR && RHEL_MAJOR >= 7 && defined RHEL_MINOR && RHEL_MINOR >= 2))
+#define IOEM_MQ_ENABLED ((LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)) || (defined RHEL_MAJOR && RHEL_MAJOR >= 7 && defined RHEL_MINOR && RHEL_MINOR >= 6))
 
 /**
  * struct ioem_data - the main data of ioem
