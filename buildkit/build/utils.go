@@ -3,18 +3,40 @@ package build
 import (
 	"fmt"
 	"net/http"
+	"sync"
 )
 
-func getResolvingURL(urls []string) (string, error) {
+func getResolvingURLS(urls []string) ([]string, error) {
+	ret := []string{}
+	urlsLock := sync.Mutex{}
+
+	wg := sync.WaitGroup{}
+
 	for _, u := range urls {
-		res, err := http.Head(u)
-		if err != nil {
-			continue
-		}
-		if res.StatusCode == http.StatusOK {
-			return u, nil
-		}
+		u := u
+
+		wg.Add(1)
+
+		go func() {
+			res, err := http.Head(u)
+			if err != nil {
+				return
+			}
+			if res.StatusCode == http.StatusOK {
+				urlsLock.Lock()
+				defer urlsLock.Unlock()
+
+				ret = append(ret, u)
+			}
+
+			wg.Done()
+		}()
 	}
 
-	return "", fmt.Errorf("kernel not found")
+	wg.Wait()
+
+	if len(ret) == 0 {
+		return nil, fmt.Errorf("no valid URLs found")
+	}
+	return ret, nil
 }

@@ -4,7 +4,7 @@
   
 ### Build Manually
 
-Run `make all` to build the kernel module. The `KBUILD_PATH` environment variable should point to the kernel source code. By default, it's `/lib/modules/$(uname -r)/build`.
+Run `make all` to build the kernel module. The `KBUILD_PATH` environment variable should point to the kernel source code or kernel headers, which can be installed through `yum install kernel-devel` or `apt install linux-headers-$(uname -r)` according to your distribution. By default, it's `/lib/modules/$(uname -r)/build`.
 
 ## Usage
 
@@ -52,9 +52,13 @@ Jobs: 16 (f=16): [r(16)][10.8%][r=55.5MiB/s,w=0KiB/s][r=14.2k,w=0 IOPS][eta 01m:
 
 1. multi-queue scheduler registration is only supported on the kernel newer than 4.0, or the rhel kernel released after RHEL 7.6
 
-## Warning
+#### Warning
 
 Injecting too much delay on the root device could make your system blocked. Please make sure you have some emergency methods to make the system come back.
+
+### Syscall Injection
+
+WIP. It's too dangerous to inject long delay in an atomic context, so this function is removed temporarily.
 
 ## ROADMAP
 
@@ -72,7 +76,7 @@ Injecting too much delay on the root device could make your system blocked. Plea
 - [x] Linux 4.19 (Debian Buster)
 - [x] Linux 4.15 (Ubuntu 18.04)
 - [x] Linux 3.10 (CentOS 7.9)
-- [ ] Linux 3.10 (CentOS 7.2)
+- [x] Linux 3.10 (CentOS 7.6)
 
 #### Function test
 

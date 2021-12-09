@@ -11,16 +11,16 @@ import (
 type CentosBuilder struct {
 }
 
-func (b *CentosBuilder) Script(release string, buildDir string) (string, error) {
+func (b *CentosBuilder) Script(release string, buildDir string, _ uint16) (string, error) {
 	kr := kernelrelease.FromString(release)
-	url, err := getResolvingURL(fetchCentosKernelURLS(kr))
+	urls, err := getResolvingURLS(fetchCentosKernelURLS(kr))
 	if err != nil {
 		return "", err
 	}
 
 	td := centosTemplateData{
 		DriverBuildDir:    buildDir,
-		KernelDownloadURL: url,
+		KernelDownloadURL: urls[0],
 		GCCVersion:        centosGccVersionFromKernelRelease(kr),
 	}
 
