@@ -16,7 +16,7 @@
 #include "comp.h"
 
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
-#define rq_rb_first(root) rb_to_rq(rb_first(root))
+#define rq_rb_first_cached(root) rb_to_rq(rb_first_cached(root))
 
 static void ioem_error_injection(struct request* rq);
 
@@ -46,7 +46,7 @@ static void ioem_error_injection(struct request* rq);
  * this struct is only allocated per `request_queue`.
  */
 struct ioem_data {
-    struct rb_root root;
+    struct rb_root_cached root;
     spinlock_t lock;
 
     struct hrtimer timer;
@@ -112,8 +112,6 @@ struct irl {
     atomic64_t io_counter;
     atomic64_t last_expire_time;
     struct hrtimer timer;
-
-    atomic64_t affected_request_counter;
 };
 
 /**
@@ -193,7 +191,7 @@ static struct irl_dispatch_return irl_dispatch(struct ioem_data* data, struct re
     read_lock(&irl->lock);
 
     period = atomic64_read(&irl->io_period_us);
-    if (period == 0 || !ioem_priv(rq)->ioem_limit_should_affect) {
+    if (period == 0) {
         // the irl is not enabled
         ret.dispatch = 1;
         ret.time_to_send = 0;
@@ -208,9 +206,9 @@ static struct irl_dispatch_return irl_dispatch(struct ioem_data* data, struct re
             counter = atomic64_read(&irl->io_counter);
         }
         if (counter < quota) {
+            // 
             ret.dispatch = 1;
             ret.time_to_send = 0;
-            atomic64_dec(&irl->affected_request_counter);
         } else { 
             ret.dispatch = 0;
             ret.time_to_send = last_expire_time + period * NSEC_PER_USEC;
@@ -220,36 +218,6 @@ static struct irl_dispatch_return irl_dispatch(struct ioem_data* data, struct re
     read_unlock(&irl->lock);
 
     return ret;
-}
-
-/**
- * irl_enqueue() - optimize the time_to_send of a request which will enqueue
- * @data: The corresponding ioem_data struct
- * @rq: The request to be dispatch
- *
- * This function will read the counter inside irl. If the counter is already
- * greater than the quota and the `time_to_send` is earlier than the next
- * period, it will set the `time_to_send` of the request to the next period.
- */
-static void irl_enqueue(struct ioem_data* data, struct request* rq)
-{
-    u64 next_period, period, counter;
-    struct irl* irl = data->irl;
-
-    period = atomic64_read(&irl->io_period_us);
-    if (period == 0 || !ioem_priv(rq)->ioem_limit_should_affect) {
-        return;
-    }
-
-    counter = atomic64_fetch_add(1, &irl->affected_request_counter);
-    read_lock(&irl->lock);
-    if (atomic64_read(&irl->io_counter) > irl->io_quota) {
-        next_period = atomic64_read(&irl->last_expire_time) + atomic64_read(&irl->io_period_us) * NSEC_PER_USEC * (counter / irl->io_quota);
-        if (ioem_priv(rq)->time_to_send < next_period) {
-            ioem_priv(rq)->time_to_send = next_period;
-        };
-    }
-    read_unlock(&irl->lock);
 }
 
 static void ioem_data_sync_with_injections(struct ioem_data* data);
@@ -264,7 +232,7 @@ static void ioem_data_sync_with_injections(struct ioem_data* data);
  */
 static void ioem_erase_head(struct ioem_data *data, struct request *rq)
 {
-    rb_erase(&rq->rb_node, &data->root);
+    rb_erase_cached(&rq->rb_node, &data->root);
     RB_CLEAR_NODE(&rq->rb_node);
     INIT_LIST_HEAD(&rq->queuelist);
 }
@@ -275,7 +243,7 @@ static void ioem_erase_head(struct ioem_data *data, struct request *rq)
  */
 static struct request* ioem_peek_request(struct ioem_data *data)
 {
-    struct request* ioem_rq = rq_rb_first(&data->root);
+    struct request* ioem_rq = rq_rb_first_cached(&data->root);
 
     return ioem_rq;
 }
@@ -299,7 +267,7 @@ static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*functi
     hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
 
     spin_lock_init(&data->lock);
-    data->root = RB_ROOT;
+    data->root = RB_ROOT_CACHED;
     data->timer.function = function;
     data->next_expires = 0;
 
@@ -311,30 +279,29 @@ static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*functi
  * @data: The `ioem_data` strucutre 
  * @rq: The request 
  *
- * The request will be inserted into the rb tree. Before inserting the request,
- * it will also check whether this request will be affected by the irl and
- * whether the irl has 
+ * The request will be inserted into the rb tree
  */
 static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 {
-    struct rb_node **p = &data->root.rb_node, *parent = NULL;
+    struct rb_node **p = &data->root.rb_root.rb_node, *parent = NULL;
+    bool leftmost = true;
 
-    irl_enqueue(data, rq);
-    
     while (*p) {
         struct request* parent_rq;
 
         parent = *p;
         parent_rq = rb_entry_safe(parent, struct request, rb_node);
 
-        if (ioem_priv(rq)->time_to_send > ioem_priv(parent_rq)->time_to_send)
+        if (ioem_priv(rq)->time_to_send > ioem_priv(parent_rq)->time_to_send) {
             p = &parent->rb_right;
+            leftmost = false;
+        }
         else
             p = &parent->rb_left;
     }
 
     rb_link_node(&rq->rb_node, parent, p);
-    rb_insert_color(&rq->rb_node, &data->root);
+    rb_insert_color_cached(&rq->rb_node, &data->root, leftmost);
 }
 
 /**
@@ -354,7 +321,7 @@ static struct request* ioem_dequeue(struct ioem_data *data)
     u64 now, time_to_send;
     struct request* rq = NULL;
 
-    if (RB_EMPTY_ROOT(&data->root)) {
+    if (RB_EMPTY_ROOT(&data->root.rb_root)) {
         return NULL;
     }
 
@@ -531,8 +498,6 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
     ioem_data_sync_with_injections(id);
 
     list_for_each_entry_safe(rq, next, list, queuelist) {
-        rq = list_first_entry(list, struct request, queuelist);
-        
         list_del(&rq->queuelist);
 
         if (at_head) {
@@ -558,7 +523,7 @@ static bool ioem_mq_has_work(struct blk_mq_hw_ctx * hctx)
     struct ioem_data *id = hctx->sched_data;
     bool has_work = 0;
 
-    has_work = !RB_EMPTY_ROOT(&id->root);
+    has_work = !RB_EMPTY_ROOT(&id->root.rb_root);
 
     return has_work;
 }
@@ -988,6 +953,7 @@ int ioem_del(unsigned long id) {
         {
             list_del(&e->list);
             kref_put(&e->refcount, ioem_injection_release);
+            break;
         }
     }
 

@@ -27,10 +27,10 @@ If your system don't support multiqueue IO (which is the default for linux < 4.1
 Then, you can use the client to send commands to the kernel module:
 
 ```bash
-sudo ./bin/kchaos inject ioem limit --period-us 1000 --quota 15
+sudo ./bin/kchaos inject ioem limit --period-us 100000 --quota 1500
 ```
 
-Then the IOPS of `sda` will be limited to `1000 * 1000 / 1000 * 15 = 15k`, which can be verified by a raw scan through `fio`:
+Then the IOPS of `sda` will be limited to `1000 * 1000 / 100000 * 1500 = 15k`, which can be verified by a raw scan through `fio`:
 
 ```bash
 sudo fio --filename=/dev/sda --direct=1 --rw=randread --bs=4k --ioengine=libaio --iodepth=256 --runtime=120 --numjobs=16 --time_based --group_reporting --name=iops-test-job --eta-newline=1 --readonly
@@ -54,7 +54,8 @@ Jobs: 16 (f=16): [r(16)][10.8%][r=55.5MiB/s,w=0KiB/s][r=14.2k,w=0 IOPS][eta 01m:
 
 #### Warning
 
-Injecting too much delay on the root device could make your system blocked. Please make sure you have some emergency methods to make the system come back.
+1. Injecting too much delay on the root device could make your system blocked. Please make sure you have some emergency methods to make the system come back.
+2. Small `period-us` in limit injection will cost a lot of cpu time, and may block the io request of other processes (not selected by the filter) on the same block device. It's always suggested to be set greater than `5000`.
 
 ### Syscall Injection
 
