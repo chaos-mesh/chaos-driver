@@ -70,6 +70,28 @@ struct ioem_data {
 static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq);
 
 /**
+ * struct ioem_priv - The priv data stored in request 
+ * @time_to_send: The expected sending time of the request
+ *
+ * The expected sending time is calculated when this request comes into the
+ * scheduler, then it will be stored in the `struct ioem_priv`. This struct
+ * shouldn't be longer than three pointers, as the `rq->elv` only have three
+ * pointers long.
+ */
+struct ioem_priv {
+    u64 time_to_send;
+    bool ioem_limit_should_affect;
+}__attribute__((packed));
+
+struct ioem_priv* ioem_priv(struct request *rq)
+{
+    BUILD_BUG_ON(sizeof(struct ioem_priv) > sizeof(rq->elv));
+    // `priv` has two pointers long, is enough to store the `ioem_priv`.
+    return (struct ioem_priv*)(&rq->elv.priv[0]);
+}
+
+
+/**
  * struct irl - request limit
  * @lock: The lock protects the config
  * @io_period_us: The period to reset the counter (in us)
@@ -90,6 +112,8 @@ struct irl {
     atomic64_t io_counter;
     atomic64_t last_expire_time;
     struct hrtimer timer;
+
+    atomic64_t affected_request_counter;
 };
 
 /**
@@ -137,6 +161,7 @@ static void irl_init(struct irl* counter)
     rwlock_init(&counter->lock);
     hrtimer_init(&counter->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
     counter->timer.function = irl_timer_callback;
+    atomic64_set(&counter->last_expire_time, ktime_get_ns());
 }
 
 struct irl_dispatch_return {
@@ -145,7 +170,7 @@ struct irl_dispatch_return {
 };
 
 /**
- * irl_dispatch() - change the config of irl
+ * irl_dispatch() - check whether this request can dispatch
  * @data: The corresponding ioem_data struct
  * @rq: The request to be dispatch
  *
@@ -163,11 +188,12 @@ static struct irl_dispatch_return irl_dispatch(struct ioem_data* data, struct re
     u64 counter;
     u64 quota;
     u64 period;
+    u64 last_expire_time = atomic64_read(&irl->last_expire_time);
 
     read_lock(&irl->lock);
 
     period = atomic64_read(&irl->io_period_us);
-    if (period == 0 || !ioem_limit_should_affect(data, rq)) {
+    if (period == 0 || !ioem_priv(rq)->ioem_limit_should_affect) {
         // the irl is not enabled
         ret.dispatch = 1;
         ret.time_to_send = 0;
@@ -182,12 +208,12 @@ static struct irl_dispatch_return irl_dispatch(struct ioem_data* data, struct re
             counter = atomic64_read(&irl->io_counter);
         }
         if (counter < quota) {
-            // 
             ret.dispatch = 1;
             ret.time_to_send = 0;
+            atomic64_dec(&irl->affected_request_counter);
         } else { 
             ret.dispatch = 0;
-            ret.time_to_send = ktime_get_ns() + period * NSEC_PER_USEC;
+            ret.time_to_send = last_expire_time + period * NSEC_PER_USEC;
         }
     }
 
@@ -197,24 +223,33 @@ static struct irl_dispatch_return irl_dispatch(struct ioem_data* data, struct re
 }
 
 /**
- * struct ioem_priv - The priv data stored in request 
- * @time_to_send: The expected sending time of the request
+ * irl_enqueue() - optimize the time_to_send of a request which will enqueue
+ * @data: The corresponding ioem_data struct
+ * @rq: The request to be dispatch
  *
- * The expected sending time is calculated when this request comes into the
- * scheduler, then it will be stored in the `struct ioem_priv`. This struct
- * shouldn't be longer than three pointers, as the `rq->elv` only have three
- * pointers long.
+ * This function will read the counter inside irl. If the counter is already
+ * greater than the quota and the `time_to_send` is earlier than the next
+ * period, it will set the `time_to_send` of the request to the next period.
  */
-struct ioem_priv {
-    u64 time_to_send;
-    unsigned int pid_ns;
-}__attribute__((packed));
-
-struct ioem_priv* ioem_priv(struct request *rq)
+static void irl_enqueue(struct ioem_data* data, struct request* rq)
 {
-    BUILD_BUG_ON(sizeof(struct ioem_priv) > sizeof(rq->elv));
-    // `priv` has two pointers long, is enough to store the `ioem_priv`.
-    return (struct ioem_priv*)(&rq->elv.priv[0]);
+    u64 next_period, period, counter;
+    struct irl* irl = data->irl;
+
+    period = atomic64_read(&irl->io_period_us);
+    if (period == 0 || !ioem_priv(rq)->ioem_limit_should_affect) {
+        return;
+    }
+
+    counter = atomic64_fetch_add(1, &irl->affected_request_counter);
+    read_lock(&irl->lock);
+    if (atomic64_read(&irl->io_counter) > irl->io_quota) {
+        next_period = atomic64_read(&irl->last_expire_time) + atomic64_read(&irl->io_period_us) * NSEC_PER_USEC * (counter / irl->io_quota);
+        if (ioem_priv(rq)->time_to_send < next_period) {
+            ioem_priv(rq)->time_to_send = next_period;
+        };
+    }
+    read_unlock(&irl->lock);
 }
 
 static void ioem_data_sync_with_injections(struct ioem_data* data);
@@ -276,19 +311,23 @@ static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*functi
  * @data: The `ioem_data` strucutre 
  * @rq: The request 
  *
- * The request will be inserted into the rb tree
+ * The request will be inserted into the rb tree. Before inserting the request,
+ * it will also check whether this request will be affected by the irl and
+ * whether the irl has 
  */
 static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 {
     struct rb_node **p = &data->root.rb_node, *parent = NULL;
 
+    irl_enqueue(data, rq);
+    
     while (*p) {
         struct request* parent_rq;
 
         parent = *p;
         parent_rq = rb_entry_safe(parent, struct request, rb_node);
 
-        if (ioem_priv(rq)->time_to_send >= ioem_priv(parent_rq)->time_to_send)
+        if (ioem_priv(rq)->time_to_send > ioem_priv(parent_rq)->time_to_send)
             p = &parent->rb_right;
         else
             p = &parent->rb_left;
@@ -319,24 +358,41 @@ static struct request* ioem_dequeue(struct ioem_data *data)
         return NULL;
     }
 
-    rq = ioem_peek_request(data);
-
     now = ktime_get_ns();
-    time_to_send = ioem_priv(rq)->time_to_send;
-
-    if (time_to_send <= now) {
+    while (true) {
         struct irl_dispatch_return irl_ret;
+        
+        rq = ioem_peek_request(data);
+        time_to_send = ioem_priv(rq)->time_to_send;
+
+        // if this request's `time_to_send` is earlier than now, later requests
+        // will be all later than now, then we need to return without any
+        // request dispatched.
+        if (time_to_send > now) {
+            rq = NULL;
+            break;
+        }
+
+        // check the IRL to decide whether the quota has exceeded
+        ioem_erase_head(data, rq);
+
         irl_ret = irl_dispatch(data, rq);
         if (irl_ret.dispatch > 0) {
-            ioem_erase_head(data, rq);
+            // not exceeded, return the request
+            break;
         } else {
-            time_to_send = irl_ret.time_to_send;
+            // exceeded. Modify the time_to_send of this request, and reinsert
+            // to the rb_tree.
+            ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
+            ioem_enqueue(data, rq);
+
             rq = NULL;
         }
-    } else {
-        rq = NULL;
     }
 
+    // There are three possible situations to reach here:
+    // 1. The request is not NULL and is prepared to send
+    // 2. The earliest time_to_send is later than now
     if (rq != NULL) {
         return rq;
     }
@@ -468,22 +524,26 @@ struct request* ioem_mq_dispatch_request(struct blk_mq_hw_ctx * hctx)
 
 static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_head * list, bool at_head) 
 {
+    struct request *rq, *next;
     struct ioem_data *id = hctx->sched_data;
 
     spin_lock(&id->lock);
     ioem_data_sync_with_injections(id);
 
-    while (!list_empty(list)) {
-        struct request *rq;
-
+    list_for_each_entry_safe(rq, next, list, queuelist) {
         rq = list_first_entry(list, struct request, queuelist);
-        list_del_init(&rq->queuelist);
+        
+        list_del(&rq->queuelist);
 
-        ioem_priv(rq)->time_to_send = ktime_get_ns();
-        ioem_priv(rq)->pid_ns = ns_inum(task_active_pid_ns(current));
+        if (at_head) {
+            ioem_priv(rq)->time_to_send = 0;
+            ioem_priv(rq)->ioem_limit_should_affect = 0;
+        } else {
+            ioem_priv(rq)->time_to_send = ktime_get_ns();
+            ioem_priv(rq)->ioem_limit_should_affect = ioem_limit_should_affect(id, rq);
+        }
 
         ioem_error_injection(rq);
-
         ioem_enqueue(id, rq);
 
         #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
@@ -964,12 +1024,21 @@ static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
     return ((rnd % (2 * (u32)jitter)) + mu) - jitter;
 }
 
+/**
+ * ioem_should_inject() - whether this request should be injected
+ * @rq: The io request
+ * @e: The ioem injection
+ *
+ * This functions should be called under process context, which means the
+ * `current` should point to the current process, so that we can get the pid
+ * namespace (or other information) of the process.
+ */
 static bool ioem_should_inject(struct request* rq, struct ioem_injection* e) {
     if (rq->bio == NULL || e == NULL) {
         return 0;
     }
 
-    if (e->arg.pid_ns != 0 && ioem_priv(rq)->pid_ns != e->arg.pid_ns) {
+    if (e->arg.pid_ns != 0 && ns_inum(task_active_pid_ns(current)) != e->arg.pid_ns) {
         return 0;
     }
 

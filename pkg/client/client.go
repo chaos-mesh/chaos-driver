@@ -55,7 +55,7 @@ func (c *Client) GetVersion() int {
 	return int(version)
 }
 
-func (c *Client) InjectIOEMDelay(devPath string, op int, pid uint, delay int64, jitter int64, corr uint32) (int, error) {
+func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64, jitter int64, corr uint32) (int, error) {
 	dev := C.uint32_t(0)
 	if len(devPath) > 0 {
 		info, err := os.Stat(devPath)
@@ -70,7 +70,7 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, pid uint, delay int64, 
 		dev = C.uint32_t(stat.Rdev)
 	}
 
-	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op), C.uint(pid))
+	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op), C.uint(pidNs))
 	delay_arg := C.ioem_injector_delay_arg_new(C.int64_t(delay), C.int64_t(jitter), C.uint32_t(corr))
 
 	id := C.add_injection(C.int(c.fd), 0, unsafe.Pointer(&ioem_injection), 0, unsafe.Pointer(&delay_arg))
@@ -81,7 +81,7 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, pid uint, delay int64, 
 	return int(id), nil
 }
 
-func (c *Client) InjectIOEMLimit(devPath string, op int, pid uint, period_us uint64, quota uint64) (int, error) {
+func (c *Client) InjectIOEMLimit(devPath string, op int, pidNs uint, period_us uint64, quota uint64) (int, error) {
 	dev := C.uint32_t(0)
 	if len(devPath) > 0 {
 		info, err := os.Stat(devPath)
@@ -96,7 +96,7 @@ func (c *Client) InjectIOEMLimit(devPath string, op int, pid uint, period_us uin
 		dev = C.uint32_t(stat.Rdev)
 	}
 
-	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op), C.uint(pid))
+	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op), C.uint(pidNs))
 	limit_arg := C.ioem_injector_limit_arg_new(C.uint64_t(period_us), C.uint64_t(quota))
 
 	id := C.add_injection(C.int(c.fd), 0, unsafe.Pointer(&ioem_injection), 1, unsafe.Pointer(&limit_arg))

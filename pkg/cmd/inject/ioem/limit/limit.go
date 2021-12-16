@@ -25,7 +25,7 @@ import (
 
 var dev_path string
 var op int
-var pid uint
+var pidNs uint
 var period_us, quota uint64
 
 var Limit = &cobra.Command{
@@ -37,7 +37,7 @@ var Limit = &cobra.Command{
 			os.Exit(1)
 		}
 
-		id, err := c.InjectIOEMLimit(dev_path, op, pid, period_us, quota)
+		id, err := c.InjectIOEMLimit(dev_path, op, pidNs, period_us, quota)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -49,7 +49,7 @@ var Limit = &cobra.Command{
 
 func init() {
 	Limit.Flags().IntVar(&op, "op", 0, "operation filter of the injection. 0 for all, 1 for write, 2 for read")
-	Limit.Flags().UintVar(&pid, "pid", 0, "pid namespace filter of the injection. 0 for all, others for the pid namespace of the specified process")
+	Limit.Flags().UintVar(&pidNs, "pid-ns", 0, "pid namespace filter of the injection. 0 for all, others for the pid namespace of the specified process")
 	Limit.Flags().StringVar(&dev_path, "dev_path", "", "path of the injected device")
 
 	Limit.Flags().Uint64Var(&period_us, "period-us", 0, "the period time to reset counter")
