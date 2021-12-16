@@ -1,18 +1,47 @@
 # Chaos Driver
 
-## Build
-  
+## Install
+
+You can install the Chaos Driver in two ways: install from the package manager, or build manually.
+
+### Packages
+
+#### Arch Linux
+
+If you are using Arch Linux, you can find the package on AUR: [chaos-driver](https://aur.archlinux.org/pkgbase/chaos-driver/). You can install it with the help of any AUR helper. For example:
+
+```bash
+yay chaos-driver-dkms
+yay kchaos
+```
+
+The `chaos-driver-dkms` is the kernel module, and the `kchaos` is the client to communicate with it. After installing the packages, you can load the kernel module through:
+
+```bash
+modprobe chaos_driver
+```
+
 ### Build Manually
 
-Run `make all` to build the kernel module. The `KBUILD_PATH` environment variable should point to the kernel source code or kernel headers, which can be installed through `yum install kernel-devel` or `apt install linux-headers-$(uname -r)` according to your distribution. By default, it's `/lib/modules/$(uname -r)/build`.
+#### Client
 
-## Usage
+The client `kchaos` is a normal cgo program. Use the following commands to compile it:
+
+```bash
+go build -o ./bin/kchaos ./cmd 
+```
+
+#### Kernel Module
+
+Run `make all` to build the kernel module. The `KBUILD_PATH` environment variable should point to the kernel source code or kernel headers, which can be installed through `yum install kernel-devel` or `apt install linux-headers-$(uname -r)` according to your distribution. By default, it's `/lib/modules/$(uname -r)/build`.
 
 After building the kernel module, you could load it by running the following command:
 
 ```bash
 insmod ./driver/chaos_driver.ko
 ```
+
+## Usage
 
 ### IOEM
 
@@ -67,6 +96,12 @@ WIP. It's too dangerous to inject long delay in an atomic context, so this funct
 
 - [x] Inject latency
 - [x] Traffic controll of IO
+- Package for distributions
+    - [x] AUR
+    - [ ] Debian
+    - [ ] Ubuntu PPA
+    - [ ] Fedora
+    - [ ] Cent OS
 
 ### Test 
 
