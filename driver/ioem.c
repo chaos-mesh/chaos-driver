@@ -25,6 +25,7 @@ static void ioem_error_injection(struct request* rq);
 /**
  * struct ioem_data - the main data of ioem
  * @root: The rb tree root, which is sorted according to `time_to_send`
+ * @list: The list head, which is used to store the waiting requests for IOPS limitation
  * @lock: The spinlock of the whole structure
  * @timer: The timer used to trigger the dispatch after reaching the
  * `time_to_send`.
@@ -47,6 +48,8 @@ static void ioem_error_injection(struct request* rq);
  */
 struct ioem_data {
     struct rb_root_cached root;
+    struct list_head list;
+
     spinlock_t lock;
 
     struct hrtimer timer;
@@ -81,6 +84,8 @@ static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq)
 struct ioem_priv {
     u64 time_to_send;
     bool ioem_limit_should_affect;
+    bool in_rbtree;
+    bool in_list;
 }__attribute__((packed));
 
 struct ioem_priv* ioem_priv(struct request *rq)
@@ -232,9 +237,19 @@ static void ioem_data_sync_with_injections(struct ioem_data* data);
  */
 static void ioem_erase_head(struct ioem_data *data, struct request *rq)
 {
-    rb_erase_cached(&rq->rb_node, &data->root);
-    RB_CLEAR_NODE(&rq->rb_node);
-    INIT_LIST_HEAD(&rq->queuelist);
+    if (ioem_priv(rq)->in_rbtree) {
+        rb_erase_cached(&rq->rb_node, &data->root);
+        RB_CLEAR_NODE(&rq->rb_node);
+
+        ioem_priv(rq)->in_rbtree = false;
+    }
+
+    if (ioem_priv(rq)->in_list) {
+        list_del(&rq->queuelist);
+        INIT_LIST_HEAD(&rq->queuelist);
+
+        ioem_priv(rq)->in_list = false;
+    }
 }
 
 /**
@@ -268,6 +283,8 @@ static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*functi
 
     spin_lock_init(&data->lock);
     data->root = RB_ROOT_CACHED;
+    INIT_LIST_HEAD(&data->list);
+
     data->timer.function = function;
     data->next_expires = 0;
 
@@ -302,6 +319,8 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 
     rb_link_node(&rq->rb_node, parent, p);
     rb_insert_color_cached(&rq->rb_node, &data->root, leftmost);
+
+    ioem_priv(rq)->in_rbtree = true;
 }
 
 /**
@@ -318,45 +337,73 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
  */
 static struct request* ioem_dequeue(struct ioem_data *data)
 {
-    u64 now, time_to_send;
+    u64 now, time_to_send = 0;
     struct request* rq = NULL;
-
-    if (RB_EMPTY_ROOT(&data->root.rb_root)) {
-        return NULL;
-    }
+    struct irl_dispatch_return irl_ret;
 
     now = ktime_get_ns();
+    if (!list_empty(&data->list)) {
+        rq = list_first_entry(&data->list, struct request, queuelist);
+        // if now is ealier than the `time_to_send`, there is no need to try to
+        // dispatch
+        if (now < ioem_priv(rq)->time_to_send) {
+            irl_ret = irl_dispatch(data, rq);
+            if (irl_ret.dispatch > 0) {
+                // not exceeded, return the request
+                ioem_erase_head(data, rq);
+                goto out;
+            } else {
+                ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
+                time_to_send = irl_ret.time_to_send;
+            }
+        }
+
+        rq = NULL;
+    }
+
+    // at this time, rq is NULL, and the `time_to_send` is 0, or the next time
+    // when irl counter will be reset.
+    if (RB_EMPTY_ROOT(&data->root.rb_root)) {
+        goto out;
+    }
+
     while (true) {
-        struct irl_dispatch_return irl_ret;
-        
         rq = ioem_peek_request(data);
-        time_to_send = ioem_priv(rq)->time_to_send;
+        if (time_to_send == 0) {
+            time_to_send = ioem_priv(rq)->time_to_send;
+        } else {
+            time_to_send = min(ioem_priv(rq)->time_to_send, time_to_send);
+        }
 
         // if this request's `time_to_send` is earlier than now, later requests
         // will be all later than now, then we need to return without any
         // request dispatched.
         if (time_to_send > now) {
             rq = NULL;
-            break;
+            goto out;
         }
 
         // check the IRL to decide whether the quota has exceeded
         ioem_erase_head(data, rq);
 
-        irl_ret = irl_dispatch(data, rq);
-        if (irl_ret.dispatch > 0) {
-            // not exceeded, return the request
-            break;
-        } else {
-            // exceeded. Modify the time_to_send of this request, and reinsert
-            // to the rb_tree.
-            ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
-            ioem_enqueue(data, rq);
+        if (ioem_priv(rq)->ioem_limit_should_affect) {
+            irl_ret = irl_dispatch(data, rq);
+            if (irl_ret.dispatch > 0) {
+                // not exceeded, return the request
+                goto out;
+            } else {
+                // exceeded. Modify the time_to_send of this request, and reinsert
+                // to the waiting list.
+                ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
+                list_add_tail(&rq->queuelist, &data->list);
+                ioem_priv(rq)->in_list = true;
 
-            rq = NULL;
+                rq = NULL;
+            }
         }
     }
 
+out:
     // There are three possible situations to reach here:
     // 1. The request is not NULL and is prepared to send
     // 2. The earliest time_to_send is later than now
@@ -364,14 +411,16 @@ static struct request* ioem_dequeue(struct ioem_data *data)
         return rq;
     }
 
-    if (hrtimer_is_queued(&data->timer)) {
-        if (data->next_expires <= time_to_send) {
-            return NULL;
+    if (time_to_send != 0) {
+        if (hrtimer_is_queued(&data->timer)) {
+            if (data->next_expires <= time_to_send) {
+                return NULL;
+            }
         }
-    }
 
-    data->next_expires = time_to_send;
-    hrtimer_start(&data->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS_PINNED);
+        data->next_expires = time_to_send;
+        hrtimer_start(&data->timer, ns_to_ktime(time_to_send), HRTIMER_MODE_ABS_PINNED);
+    }
 
     return NULL;
 }
@@ -523,7 +572,7 @@ static bool ioem_mq_has_work(struct blk_mq_hw_ctx * hctx)
     struct ioem_data *id = hctx->sched_data;
     bool has_work = 0;
 
-    has_work = !RB_EMPTY_ROOT(&id->root.rb_root);
+    has_work = !(RB_EMPTY_ROOT(&id->root.rb_root) && list_empty(&id->list));
 
     return has_work;
 }
