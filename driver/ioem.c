@@ -677,7 +677,7 @@ static void ioem_sq_exit_sched(struct elevator_queue * e)
 {
     struct ioem_data *id = e->elevator_data;
 
-	BUG_ON(!RB_EMPTY_ROOT(&id->root));
+	BUG_ON(!RB_EMPTY_ROOT(&id->root.rb_root));
     hrtimer_cancel(&id->irl->timer);
 	kfree(id->irl);
 	kfree(id);
