@@ -350,7 +350,7 @@ static struct request* ioem_dequeue(struct ioem_data *data)
         rq = list_first_entry(&data->list, struct request, queuelist);
         // if now is ealier than the `time_to_send`, there is no need to try to
         // dispatch
-        if (now < ioem_priv(rq)->time_to_send) {
+        if (now >= ioem_priv(rq)->time_to_send) {
             irl_ret = irl_dispatch(data, rq);
             if (irl_ret.dispatch > 0) {
                 // not exceeded, return the request
