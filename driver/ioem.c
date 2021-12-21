@@ -1,5 +1,9 @@
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
+
+struct elevator_queue;
+struct request;
+
 #include <linux/elevator.h>
 #include <linux/spinlock.h>
 #include <linux/version.h>
@@ -367,7 +371,7 @@ static struct request* ioem_dequeue(struct ioem_data *data)
         goto out;
     }
 
-    while (true) {
+    while (!RB_EMPTY_ROOT(&data->root.rb_root)) {
         rq = ioem_peek_request(data);
         if (time_to_send == 0) {
             time_to_send = ioem_priv(rq)->time_to_send;
@@ -386,6 +390,8 @@ static struct request* ioem_dequeue(struct ioem_data *data)
         // check the IRL to decide whether the quota has exceeded
         ioem_erase_head(data, rq);
 
+        // if this request should be considered by irl, try to dispatch through irl.
+        // if not, return the request directly.
         if (ioem_priv(rq)->ioem_limit_should_affect) {
             irl_ret = irl_dispatch(data, rq);
             if (irl_ret.dispatch > 0) {
@@ -397,9 +403,12 @@ static struct request* ioem_dequeue(struct ioem_data *data)
                 ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
                 list_add_tail(&rq->queuelist, &data->list);
                 ioem_priv(rq)->in_list = true;
+                time_to_send = min(time_to_send, irl_ret.time_to_send);
 
                 rq = NULL;
             }
+        } else {
+            goto out;
         }
     }
 
@@ -547,7 +556,7 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
     ioem_data_sync_with_injections(id);
 
     list_for_each_entry_safe(rq, next, list, queuelist) {
-        list_del(&rq->queuelist);
+        list_del_init(&rq->queuelist);
 
         if (at_head) {
             ioem_priv(rq)->time_to_send = 0;
@@ -556,6 +565,8 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
             ioem_priv(rq)->time_to_send = ktime_get_ns();
             ioem_priv(rq)->ioem_limit_should_affect = ioem_limit_should_affect(id, rq);
         }
+        ioem_priv(rq)->in_list = false;
+        ioem_priv(rq)->in_rbtree = false;
 
         ioem_error_injection(rq);
         ioem_enqueue(id, rq);

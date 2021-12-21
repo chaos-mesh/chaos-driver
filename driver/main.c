@@ -20,6 +20,10 @@
 
 #include <linux/delay.h>
 #include <linux/fdtable.h>
+
+struct elevator_queue;
+struct request;
+
 #include <linux/elevator.h>
 
 #include "config.h"
