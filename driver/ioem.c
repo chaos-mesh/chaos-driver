@@ -29,7 +29,7 @@ static void ioem_error_injection(struct request* rq);
 /**
  * struct ioem_data - the main data of ioem
  * @root: The rb tree root, which is sorted according to `time_to_send`
- * @list: The list head, which is used to store the waiting requests for IOPS limitation
+ * @wait_queue: The wait_queue head, which is used to store the waiting requests for IOPS limitation
  * @lock: The spinlock of the whole structure
  * @timer: The timer used to trigger the dispatch after reaching the
  * `time_to_send`.
@@ -51,8 +51,15 @@ static void ioem_error_injection(struct request* rq);
  * this struct is only allocated per `request_queue`.
  */
 struct ioem_data {
+    // The rb tree root is used to handle requests with delay. The request with
+    // smaller `time_to_send` will be handled first. However, if the `delay` is
+    // the same, then we will insert into this rb_tree with increasing data,
+    // which may cause frequent rebalance. As the practice of netem, we should
+    // add a list to optimize for this situation.
+    // However, current performance seems fine.
     struct rb_root_cached root;
-    struct list_head list;
+
+    struct list_head wait_queue;
 
     spinlock_t lock;
 
@@ -287,7 +294,7 @@ static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*functi
 
     spin_lock_init(&data->lock);
     data->root = RB_ROOT_CACHED;
-    INIT_LIST_HEAD(&data->list);
+    INIT_LIST_HEAD(&data->wait_queue);
 
     data->timer.function = function;
     data->next_expires = 0;
@@ -346,8 +353,8 @@ static struct request* ioem_dequeue(struct ioem_data *data)
     struct irl_dispatch_return irl_ret;
 
     now = ktime_get_ns();
-    if (!list_empty(&data->list)) {
-        rq = list_first_entry(&data->list, struct request, queuelist);
+    if (!list_empty(&data->wait_queue)) {
+        rq = list_first_entry(&data->wait_queue, struct request, queuelist);
         // if now is ealier than the `time_to_send`, there is no need to try to
         // dispatch
         if (now >= ioem_priv(rq)->time_to_send) {
@@ -399,9 +406,9 @@ static struct request* ioem_dequeue(struct ioem_data *data)
                 goto out;
             } else {
                 // exceeded. Modify the time_to_send of this request, and reinsert
-                // to the waiting list.
+                // to the waiting wait_queue.
                 ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
-                list_add_tail(&rq->queuelist, &data->list);
+                list_add_tail(&rq->queuelist, &data->wait_queue);
                 ioem_priv(rq)->in_list = true;
                 time_to_send = min(time_to_send, irl_ret.time_to_send);
 
@@ -583,7 +590,7 @@ static bool ioem_mq_has_work(struct blk_mq_hw_ctx * hctx)
     struct ioem_data *id = hctx->sched_data;
     bool has_work = 0;
 
-    has_work = !(RB_EMPTY_ROOT(&id->root.rb_root) && list_empty(&id->list));
+    has_work = !(RB_EMPTY_ROOT(&id->root.rb_root) && list_empty(&id->wait_queue));
 
     return has_work;
 }
