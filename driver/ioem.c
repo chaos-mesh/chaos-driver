@@ -20,16 +20,16 @@ struct request;
 #include "comp.h"
 
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
-#define rq_rb_first_cached(root) rb_to_rq(rb_first_cached(root))
+#define rq_rb_first(root) rb_to_rq(rb_first(root))
 
-static void ioem_error_injection(struct request* rq);
-
+#define IS_RHEL 
 #define IOEM_MQ_ENABLED ((LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)) || (defined RHEL_MAJOR && RHEL_MAJOR >= 7 && defined RHEL_MINOR && RHEL_MINOR >= 6))
 
 /**
  * struct ioem_data - the main data of ioem
  * @root: The rb tree root, which is sorted according to `time_to_send`
  * @wait_queue: The wait_queue head, which is used to store the waiting requests for IOPS limitation
+ * @deivce: The device of current ioem_data
  * @lock: The spinlock of the whole structure
  * @timer: The timer used to trigger the dispatch after reaching the
  * `time_to_send`.
@@ -57,9 +57,11 @@ struct ioem_data {
     // which may cause frequent rebalance. As the practice of netem, we should
     // add a list to optimize for this situation.
     // However, current performance seems fine.
-    struct rb_root_cached root;
+    struct rb_root root;
 
     struct list_head wait_queue;
+
+    dev_t device;
 
     spinlock_t lock;
 
@@ -80,6 +82,8 @@ struct ioem_data {
     struct work_struct unplug_work;
     #endif
 };
+
+static void ioem_error_injection(struct ioem_data* id, struct request* rq);
 
 static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq);
 
@@ -249,7 +253,7 @@ static void ioem_data_sync_with_injections(struct ioem_data* data);
 static void ioem_erase_head(struct ioem_data *data, struct request *rq)
 {
     if (ioem_priv(rq)->in_rbtree) {
-        rb_erase_cached(&rq->rb_node, &data->root);
+        rb_erase(&rq->rb_node, &data->root);
         RB_CLEAR_NODE(&rq->rb_node);
 
         ioem_priv(rq)->in_rbtree = false;
@@ -269,7 +273,7 @@ static void ioem_erase_head(struct ioem_data *data, struct request *rq)
  */
 static struct request* ioem_peek_request(struct ioem_data *data)
 {
-    struct request* ioem_rq = rq_rb_first_cached(&data->root);
+    struct request* ioem_rq = rq_rb_first(&data->root);
 
     return ioem_rq;
 }
@@ -293,7 +297,7 @@ static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*functi
     hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
 
     spin_lock_init(&data->lock);
-    data->root = RB_ROOT_CACHED;
+    data->root = RB_ROOT;
     INIT_LIST_HEAD(&data->wait_queue);
 
     data->timer.function = function;
@@ -311,8 +315,7 @@ static void ioem_data_init(struct ioem_data* data, enum hrtimer_restart	(*functi
  */
 static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 {
-    struct rb_node **p = &data->root.rb_root.rb_node, *parent = NULL;
-    bool leftmost = true;
+    struct rb_node **p = &data->root.rb_node, *parent = NULL;
 
     while (*p) {
         struct request* parent_rq;
@@ -322,14 +325,13 @@ static void ioem_enqueue(struct ioem_data *data, struct request *rq)
 
         if (ioem_priv(rq)->time_to_send > ioem_priv(parent_rq)->time_to_send) {
             p = &parent->rb_right;
-            leftmost = false;
         }
         else
             p = &parent->rb_left;
     }
 
     rb_link_node(&rq->rb_node, parent, p);
-    rb_insert_color_cached(&rq->rb_node, &data->root, leftmost);
+    rb_insert_color(&rq->rb_node, &data->root);
 
     ioem_priv(rq)->in_rbtree = true;
 }
@@ -374,11 +376,11 @@ static struct request* ioem_dequeue(struct ioem_data *data)
 
     // at this time, rq is NULL, and the `time_to_send` is 0, or the next time
     // when irl counter will be reset.
-    if (RB_EMPTY_ROOT(&data->root.rb_root)) {
+    if (RB_EMPTY_ROOT(&data->root)) {
         goto out;
     }
 
-    while (!RB_EMPTY_ROOT(&data->root.rb_root)) {
+    while (!RB_EMPTY_ROOT(&data->root)) {
         rq = ioem_peek_request(data);
         if (time_to_send == 0) {
             time_to_send = ioem_priv(rq)->time_to_send;
@@ -522,6 +524,12 @@ static int ioem_mq_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
     ioem_data_init(id, ioem_mq_timer, hctx->queue->elevator->elevator_data);
     id->hctx = hctx;
 
+    #if LINUX_VERSION_CODE > KERNEL_VERSION(4, 0, 0)
+    id->device = hctx->queue->backing_dev_info->dev->devt;
+    #else
+    id->device = hctx->queue->backing_dev_info.dev->devt;
+    #endif
+
     hctx->sched_data = id;
     return 0;
 }
@@ -575,7 +583,7 @@ static void ioem_mq_insert_requests(struct blk_mq_hw_ctx * hctx, struct list_hea
         ioem_priv(rq)->in_list = false;
         ioem_priv(rq)->in_rbtree = false;
 
-        ioem_error_injection(rq);
+        ioem_error_injection(id, rq);
         ioem_enqueue(id, rq);
 
         #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
@@ -590,7 +598,7 @@ static bool ioem_mq_has_work(struct blk_mq_hw_ctx * hctx)
     struct ioem_data *id = hctx->sched_data;
     bool has_work = 0;
 
-    has_work = !(RB_EMPTY_ROOT(&id->root.rb_root) && list_empty(&id->wait_queue));
+    has_work = !(RB_EMPTY_ROOT(&id->root) && list_empty(&id->wait_queue));
 
     return has_work;
 }
@@ -729,6 +737,7 @@ static int ioem_sq_init_sched(struct request_queue *q, struct elevator_type *e)
     
     ioem_data_init(id, ioem_sq_timer, irl);
     id->q = q;
+    id->device = q->backing_dev_info.dev->devt;
     INIT_WORK(&id->unplug_work, ioem_sq_kick_queue);
 
     eq->elevator_data = id;
@@ -744,7 +753,7 @@ static void ioem_sq_exit_sched(struct elevator_queue * e)
 {
     struct ioem_data *id = e->elevator_data;
 
-	BUG_ON(!RB_EMPTY_ROOT(&id->root.rb_root));
+	BUG_ON(!RB_EMPTY_ROOT(&id->root));
     hrtimer_cancel(&id->irl->timer);
 	kfree(id->irl);
 	kfree(id);
@@ -756,7 +765,7 @@ static void ioem_sq_insert_request(struct request_queue *q, struct request *rq)
 
     ioem_data_sync_with_injections(id);
     ioem_priv(rq)->time_to_send = ktime_get_ns();
-    ioem_error_injection(rq);
+    ioem_error_injection(id, rq);
 
     ioem_enqueue(id, rq);
 
@@ -1066,7 +1075,7 @@ static s64 ioem_random(s64 mu, s32 jitter, struct crndstate *state) {
  * `current` should point to the current process, so that we can get the pid
  * namespace (or other information) of the process.
  */
-static bool ioem_should_inject(struct request* rq, struct ioem_injection* e) {
+static bool ioem_should_inject(struct ioem_data* id, struct request* rq, struct ioem_injection* e) {
     if (rq->bio == NULL || e == NULL) {
         return 0;
     }
@@ -1075,7 +1084,7 @@ static bool ioem_should_inject(struct request* rq, struct ioem_injection* e) {
         return 0;
     }
 
-    if (e->arg.device != 0 && !bio_is_device(rq->bio, e->arg.device)) {
+    if (e->arg.device != 0 && e->arg.device == id->device) {
         return 0;
     }
 
@@ -1093,7 +1102,7 @@ static bool ioem_should_inject(struct request* rq, struct ioem_injection* e) {
     return 1;
 }
 
-static void ioem_error_injection(struct request* rq)
+static void ioem_error_injection(struct ioem_data* id, struct request* rq)
 {
     struct ioem_injection* e;
     u64 delay = 0;
@@ -1101,7 +1110,7 @@ static void ioem_error_injection(struct request* rq)
     read_lock(&ioem_injections.lock);
     list_for_each_entry(e, &ioem_injections.list, list)
     {
-        if (!ioem_should_inject(rq, e)) {
+        if (!ioem_should_inject(id, rq, e)) {
             continue;
         }
 
@@ -1125,7 +1134,7 @@ static bool ioem_limit_should_affect(struct ioem_data* data, struct request* rq)
     bool should_affect;
 
     read_lock(&ioem_injections.lock);
-    should_affect = ioem_should_inject(rq, data->ioem_limit);
+    should_affect = ioem_should_inject(data, rq, data->ioem_limit);
     read_unlock(&ioem_injections.lock);
 
     return should_affect;
@@ -1160,11 +1169,13 @@ static void ioem_data_sync_with_injections(struct ioem_data* data)
         list_for_each_entry(e, &ioem_injections.list, list)
         {
             if (e->injector_type == IOEM_INJECTOR_TYPE_LIMIT) {
-                irl_change(data->irl, e->limit.period_us, e->limit.quota);
-                kref_get(&e->refcount);
-                data->ioem_limit = e;
-                // multiple limit is not supported
-                break;
+                if (e->arg.device == 0 || data->device == e->arg.device) {
+                    irl_change(data->irl, e->limit.period_us, e->limit.quota);
+                    kref_get(&e->refcount);
+                    data->ioem_limit = e;
+                    // multiple limit is not supported
+                    break;
+                }
             }
         }
         data->ioem_injection_version = atomic_read(&ioem_injections.version);

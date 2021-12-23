@@ -1,0 +1,33 @@
+name: Compile Kernel Module
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+        - distribution: ubuntu-generic
+          kernelVersion: 170
+          releaseVersion: 4.15.0-162-generic
+        - distribution: debian
+          kernelVersion: 1
+          releaseVersion: 4.19.0-18-amd64
+        - distribution: centos
+          kernelVersion: 1
+          releaseVersion: 3.10.0-1160.49.1.el7.x86_64
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Build BuildKit
+        run: docker build -t buildkit ./buildkit/
+      
+      - name: Build Kernel
+        run: docker run -v $(pwd)/driver:/driver buildkit buildkit -t ${{ matrix.target.distribution }} -v ${{ matrix.target.kernelVersion }} -k ${{ matrix.target.releaseVersion }}

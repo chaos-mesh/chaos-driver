@@ -17,16 +17,6 @@
 
 #endif
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0))
-
-#define bio_is_device(bio,device) (bio->bi_disk != NULL && disk_devt(bio->bi_disk) == device)
-
-#else
-
-#define bio_is_device(bio,device) (bio->bi_bdev != NULL && bio->bi_bdev->bd_dev == device)
-
-#endif 
-
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
 
 #define ns_inum(n) (n->ns.inum)
