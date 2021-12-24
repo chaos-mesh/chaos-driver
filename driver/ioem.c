@@ -737,7 +737,12 @@ static int ioem_sq_init_sched(struct request_queue *q, struct elevator_type *e)
     
     ioem_data_init(id, ioem_sq_timer, irl);
     id->q = q;
+    #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 0, 0)
     id->device = q->backing_dev_info.dev->devt;
+    #else
+    id->device = q->backing_dev_info->dev->devt;
+    #endif
+
     INIT_WORK(&id->unplug_work, ioem_sq_kick_queue);
 
     eq->elevator_data = id;
