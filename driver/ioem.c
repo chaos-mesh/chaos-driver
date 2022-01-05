@@ -16,6 +16,10 @@ struct request;
 #include <linux/sched.h>
 #include <linux/sched/task.h>
 
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 15, 0)
+#include <linux/backing-dev-defs.h>
+#endif
+
 #include "ioem.h"
 #include "comp.h"
 
@@ -524,7 +528,9 @@ static int ioem_mq_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
     ioem_data_init(id, ioem_mq_timer, hctx->queue->elevator->elevator_data);
     id->hctx = hctx;
 
-    #if LINUX_VERSION_CODE > KERNEL_VERSION(4, 0, 0)
+    #if LINUX_VERSION_CODE > KERNEL_VERSION(5, 15, 0)
+    id->device = hctx->queue->disk->bdi->dev->devt;
+    #elif LINUX_VERSION_CODE > KERNEL_VERSION(4, 0, 0)
     id->device = hctx->queue->backing_dev_info->dev->devt;
     #else
     id->device = hctx->queue->backing_dev_info.dev->devt;
