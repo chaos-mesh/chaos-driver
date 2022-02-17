@@ -27,7 +27,7 @@ var dev_path string
 var op int
 var pidNs uint
 var delay, corr int64
-var jitter uint32
+var jitter float64
 
 var Delay = &cobra.Command{
 	Use: "delay",
@@ -57,5 +57,5 @@ func init() {
 	Delay.MarkFlagRequired("delay")
 
 	Delay.Flags().Int64Var(&corr, "corr", 0, "correlation of the randominess of latency")
-	Delay.Flags().Uint32Var(&jitter, "jitter", 0, "jitter of the latency")
+	Delay.Flags().Float64Var(&jitter, "jitter", 0, "jitter of the latency")
 }

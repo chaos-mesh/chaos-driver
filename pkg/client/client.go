@@ -20,6 +20,7 @@ import "C"
 
 import (
 	"errors"
+	"math"
 	"os"
 	"syscall"
 	"unsafe"
@@ -55,7 +56,7 @@ func (c *Client) GetVersion() int {
 	return int(version)
 }
 
-func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64, jitter int64, corr uint32) (int, error) {
+func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64, jitter int64, corr float64) (int, error) {
 	dev := C.uint32_t(0)
 	if len(devPath) > 0 {
 		info, err := os.Stat(devPath)
@@ -71,7 +72,7 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64
 	}
 
 	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op), C.uint(pidNs))
-	delay_arg := C.ioem_injector_delay_arg_new(C.int64_t(delay), C.int64_t(jitter), C.uint32_t(corr))
+	delay_arg := C.ioem_injector_delay_arg_new(C.int64_t(delay), C.int64_t(jitter), C.uint32_t(math.Floor(corr*math.MaxInt32)))
 
 	id := C.add_injection(C.int(c.fd), 0, unsafe.Pointer(&ioem_injection), 0, unsafe.Pointer(&delay_arg))
 	if id < 0 {
