@@ -911,14 +911,14 @@ static struct {
     .version = ATOMIC_INIT(0),
 };
 
-static int ioem_get_pid_ns_inode_from_pid(unsigned int pid_nr, unsigned int* out)
+static int ioem_get_pid_ns_inode_from_pid(unsigned int pid_nr, struct pid_namespace* pid_ns, unsigned int* out)
 {
     int ret = 0;
     struct pid *pid;
     struct task_struct* task;
     struct pid_namespace* ns;
 
-    pid = find_vpid(pid_nr);
+    pid = find_pid_ns(pid_nr, pid_ns);
     if (pid) {
         get_pid(pid);
     } else {
@@ -976,14 +976,17 @@ int build_ioem_injection(unsigned long id, struct chaos_injection * injection)
 
     ioem_injection->arg.device = new_decode_dev(ioem_injection->arg.device);
     if (ioem_injection->arg.pid_ns != 0) {
-        unsigned int ns;
+        unsigned int ns_inode;
+        struct pid_namespace* pid_ns = get_pid_ns(task_active_pid_ns(current));
 
-        ret = ioem_get_pid_ns_inode_from_pid(ioem_injection->arg.pid_ns, &ns);
+        ret = ioem_get_pid_ns_inode_from_pid(ioem_injection->arg.pid_ns, pid_ns, &ns_inode);
+        put_pid_ns(pid_ns);
+
         if (ret > 0) {
             goto free_matcher_arg;
         }
 
-        ioem_injection->arg.pid_ns = ns;
+        ioem_injection->arg.pid_ns = ns_inode;
     }
 
     ioem_injection->injector_type = injection->injector_type;
