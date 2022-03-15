@@ -897,7 +897,6 @@ void ioem_injection_release(struct kref *ref)
 {
     struct ioem_injection *inj = container_of(ref, struct ioem_injection, refcount);
 
-    list_del(&inj->list);
     kfree(inj);
 }
 
