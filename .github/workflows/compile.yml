@@ -19,9 +19,6 @@ jobs:
         - distribution: debian
           kernelVersion: 1
           releaseVersion: 4.19.0-18-amd64
-        - distribution: debian
-          kernelVersion: 1
-          releaseVersion: 5.10.0-11-amd64
         - distribution: centos
           kernelVersion: 1
           releaseVersion: 3.10.0-1160.49.1.el7.x86_64
