@@ -126,3 +126,7 @@ WIP. It's too dangerous to inject long delay in an atomic context, so this funct
 - [x] Provide go package
 - [ ] Integrate with `chaosd`
 - [ ] Integrate with Chaos Mesh
+
+## Kernel Version Support
+
+This module supports kernel >= 3.10, and < 5.16. The kernel removes the `include/elevator.h` in 5.16, which makes it impossible to develop an out of tree elevator module.
