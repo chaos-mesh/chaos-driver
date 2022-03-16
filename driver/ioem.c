@@ -531,7 +531,7 @@ static int ioem_mq_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
     #if LINUX_VERSION_CODE > KERNEL_VERSION(5, 15, 0)
     id->device = hctx->queue->disk->bdi->dev->devt;
     #elif LINUX_VERSION_CODE > KERNEL_VERSION(4, 0, 0)
-    id->device = hctx->queue->backing_dev_info->dev->devt;
+    id->device = hctx->queue->backing_dev_info->owner->devt;
     #else
     id->device = hctx->queue->backing_dev_info.dev->devt;
     #endif
@@ -1097,7 +1097,7 @@ static bool ioem_should_inject(struct ioem_data* id, struct request* rq, struct 
         return 0;
     }
 
-    if (e->arg.device != 0 && e->arg.device == id->device) {
+    if (e->arg.device != 0 && e->arg.device != id->device) {
         return 0;
     }
 
