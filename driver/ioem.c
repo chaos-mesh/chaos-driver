@@ -373,6 +373,8 @@ static struct request* ioem_dequeue(struct ioem_data *data)
                 ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
                 time_to_send = irl_ret.time_to_send;
             }
+        } else {
+            time_to_send = ioem_priv(rq)->time_to_send;
         }
 
         rq = NULL;
@@ -416,7 +418,11 @@ static struct request* ioem_dequeue(struct ioem_data *data)
                 ioem_priv(rq)->time_to_send = irl_ret.time_to_send;
                 list_add_tail(&rq->queuelist, &data->wait_queue);
                 ioem_priv(rq)->in_list = true;
-                time_to_send = min(time_to_send, irl_ret.time_to_send);
+                if (time_to_send == 0) {
+                    time_to_send = irl_ret.time_to_send;
+                } else {
+                    time_to_send = min(time_to_send, irl_ret.time_to_send);
+                }
 
                 rq = NULL;
             }
