@@ -55,6 +55,16 @@ If your system don't support multiqueue IO (which is the default for linux < 4.1
 
 Then, you can use the client to send commands to the kernel module:
 
+#### Delay
+
+```bash
+sudo ./bin/kchaos inject ioem delay --delay 10000000
+```
+
+It will inject 1000000ns = 10ms delay to the device.
+
+#### Limit
+
 ```bash
 sudo ./bin/kchaos inject ioem limit --period-us 100000 --quota 1500
 ```
