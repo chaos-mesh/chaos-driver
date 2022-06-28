@@ -26,7 +26,6 @@ struct request;
 #define rb_to_rq(rb) rb_entry_safe(rb, struct request, rb_node)
 #define rq_rb_first(root) rb_to_rq(rb_first(root))
 
-#define IS_RHEL 
 #define IOEM_MQ_ENABLED ((LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)) || (defined RHEL_MAJOR && RHEL_MAJOR >= 7 && defined RHEL_MINOR && RHEL_MINOR >= 6))
 
 /**
@@ -835,9 +834,15 @@ static bool ioem_should_inject(struct ioem_data* id, struct request* rq, struct 
         return 0;
     }
 
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
     if (e->arg.device != 0 && e->arg.device != id->device) {
         return 0;
     }
+    #else
+    if (e->arg.device != 0 && e->arg.device != disk_devt(rq->rq_disk)) {
+        return 0;
+    }
+    #endif
 
     if (e->arg.op) 
     {
