@@ -58,33 +58,32 @@ Then, you can use the client to send commands to the kernel module:
 #### Delay
 
 ```bash
-sudo ./bin/kchaos inject ioem delay --delay 10000000
+sudo ./bin/kchaos inject ioem delay --delay 1000000000
 ```
 
-It will inject 1000000ns = 10ms delay to the device.
+It will inject 1000000000ns = 1s delay to the device.
 
-#### Limit
-
-```bash
-sudo ./bin/kchaos inject ioem limit --period-us 100000 --quota 1500
 ```
-
-Then the IOPS of `sda` will be limited to `1000 * 1000 / 100000 * 1500 = 15k`, which can be verified by a raw scan through `fio`:
-
-```bash
-sudo fio --filename=/dev/sda --direct=1 --rw=randread --bs=4k --ioengine=libaio --iodepth=256 --runtime=120 --numjobs=16 --time_based --group_reporting --name=iops-test-job --eta-newline=1 --readonly
-
-iops-test-job: (g=0): rw=randread, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=256
-...
-fio-3.7
-Starting 16 processes
-Jobs: 16 (f=16): [r(16)][3.3%][r=53.8MiB/s,w=0KiB/s][r=13.8k,w=0 IOPS][eta 01m:57s]
-Jobs: 16 (f=16): [r(16)][5.0%][r=53.4MiB/s,w=0KiB/s][r=13.7k,w=0 IOPS][eta 01m:55s]
-Jobs: 16 (f=16): [r(16)][5.8%][r=56.8MiB/s,w=0KiB/s][r=14.6k,w=0 IOPS][eta 01m:53s]
-Jobs: 16 (f=16): [r(16)][7.4%][r=55.5MiB/s,w=0KiB/s][r=14.2k,w=0 IOPS][eta 01m:52s]
-Jobs: 16 (f=16): [r(16)][8.3%][r=57.2MiB/s,w=0KiB/s][r=14.6k,w=0 IOPS][eta 01m:50s]
-Jobs: 16 (f=16): [r(16)][9.9%][r=55.3MiB/s,w=0KiB/s][r=14.2k,w=0 IOPS][eta 01m:49s]
-Jobs: 16 (f=16): [r(16)][10.8%][r=55.5MiB/s,w=0KiB/s][r=14.2k,w=0 IOPS][eta 01m:47s]
+Jobs: 16 (f=16): [r(16)][3.3%][r=57.2MiB/s,w=0KiB/s][r=14.6k,w=0 IOPS][eta 01m:57s]
+Jobs: 16 (f=16): [r(16)][4.1%][r=54.5MiB/s,w=0KiB/s][r=13.0k,w=0 IOPS][eta 01m:56s]
+Jobs: 16 (f=16): [r(16)][5.8%][r=55.9MiB/s,w=0KiB/s][r=14.3k,w=0 IOPS][eta 01m:54s] 
+Jobs: 16 (f=16): [r(16)][6.6%][r=56.1MiB/s,w=0KiB/s][r=14.4k,w=0 IOPS][eta 01m:53s]
+Jobs: 16 (f=16): [r(16)][8.3%][r=54.7MiB/s,w=0KiB/s][r=14.0k,w=0 IOPS][eta 01m:51s] 
+# Inject
+Jobs: 16 (f=16): [r(16)][9.2%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:49s]   
+Jobs: 16 (f=16): [r(16)][10.8%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:47s] 
+Jobs: 16 (f=16): [r(16)][12.5%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:45s] 
+Jobs: 16 (f=16): [r(16)][14.2%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:43s] 
+Jobs: 16 (f=16): [r(16)][15.8%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:41s] 
+Jobs: 16 (f=16): [r(16)][17.5%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:39s] 
+Jobs: 16 (f=16): [r(16)][19.2%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:37s] 
+Jobs: 16 (f=16): [r(16)][20.8%][r=768KiB/s,w=0KiB/s][r=192,w=0 IOPS][eta 01m:35s] 
+# Recover
+Jobs: 16 (f=16): [r(16)][23.1%][r=23.1MiB/s,w=0KiB/s][r=5902,w=0 IOPS][eta 01m:33s]
+Jobs: 16 (f=16): [r(16)][24.2%][r=57.5MiB/s,w=0KiB/s][r=14.7k,w=0 IOPS][eta 01m:31s] 
+Jobs: 16 (f=16): [r(16)][26.4%][r=57.6MiB/s,w=0KiB/s][r=14.7k,w=0 IOPS][eta 01m:29s] 
+Jobs: 16 (f=16): [r(16)][27.5%][r=57.5MiB/s,w=0KiB/s][r=14.7k,w=0 IOPS][eta 01m:27s] 
+Jobs: 16 (f=16): [r(16)][29.2%][r=58.3MiB/s,w=0KiB/s][r=14.9k,w=0 IOPS][eta 01m:25s]
 ```
 
 #### Note

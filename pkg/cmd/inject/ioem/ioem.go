@@ -17,7 +17,6 @@ package ioem
 
 import (
 	"github.com/chaos-mesh/chaos-driver/pkg/cmd/inject/ioem/delay"
-	"github.com/chaos-mesh/chaos-driver/pkg/cmd/inject/ioem/limit"
 	"github.com/spf13/cobra"
 )
 
@@ -27,5 +26,4 @@ var Ioem = &cobra.Command{
 
 func init() {
 	Ioem.AddCommand(delay.Delay)
-	Ioem.AddCommand(limit.Limit)
 }

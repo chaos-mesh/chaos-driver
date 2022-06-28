@@ -82,32 +82,6 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64
 	return int(id), nil
 }
 
-func (c *Client) InjectIOEMLimit(devPath string, op int, pidNs uint, period_us uint64, quota uint64) (int, error) {
-	dev := C.uint32_t(0)
-	if len(devPath) > 0 {
-		info, err := os.Stat(devPath)
-		if err != nil {
-			return 0, err
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return 0, ErrFailToGetStat
-		}
-
-		dev = C.uint32_t(stat.Rdev)
-	}
-
-	ioem_injection := C.ioem_matcher_arg_new(C.uint32_t(dev), C.int(op), C.uint(pidNs))
-	limit_arg := C.ioem_injector_limit_arg_new(C.uint64_t(period_us), C.uint64_t(quota))
-
-	id := C.add_injection(C.int(c.fd), 0, unsafe.Pointer(&ioem_injection), 1, unsafe.Pointer(&limit_arg))
-	if id < 0 {
-		return 0, syscall.Errno(-id)
-	}
-
-	return int(id), nil
-}
-
 func (c *Client) Recover(id int) error {
 	err := C.del_injection(C.int(c.fd), C.int(id))
 	if err != 0 {
