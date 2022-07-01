@@ -19,11 +19,12 @@ package client
 import "C"
 
 import (
-	"errors"
 	"math"
 	"os"
 	"syscall"
 	"unsafe"
+
+	"github.com/pkg/errors"
 )
 
 type Client struct {
@@ -38,11 +39,11 @@ var ErrFailToGetStat = errors.New("failed to get stat")
 func New() (*Client, error) {
 	fd, err := syscall.Open("/dev/chaos", syscall.O_RDWR, 0)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "open /dev/chaos")
 	}
 
 	if C.get_version(C.int(fd)) != COMPATIBLE_VERSION {
-		return nil, ErrIncompatibleVersion
+		return nil, errors.WithStack(ErrIncompatibleVersion)
 	}
 
 	return &Client{
@@ -61,11 +62,11 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64
 	if len(devPath) > 0 {
 		info, err := os.Stat(devPath)
 		if err != nil {
-			return 0, err
+			return 0, errors.Wrapf(err, "stat file: %s", devPath)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
-			return 0, ErrFailToGetStat
+			return 0, errors.Wrap(ErrFailToGetStat, "dev info is not a stat")
 		}
 
 		dev = C.uint32_t(stat.Rdev)
@@ -76,7 +77,7 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64
 
 	id := C.add_injection(C.int(c.fd), 0, unsafe.Pointer(&ioem_injection), 0, unsafe.Pointer(&delay_arg))
 	if id < 0 {
-		return 0, syscall.Errno(-id)
+		return 0, errors.Wrap(syscall.Errno(-id), "add injection")
 	}
 
 	return int(id), nil
@@ -85,7 +86,7 @@ func (c *Client) InjectIOEMDelay(devPath string, op int, pidNs uint, delay int64
 func (c *Client) Recover(id int) error {
 	err := C.del_injection(C.int(c.fd), C.int(id))
 	if err != 0 {
-		return syscall.Errno(err)
+		return errors.Wrap(syscall.Errno(err), "recover injection")
 	}
 
 	return nil
