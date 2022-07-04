@@ -51,6 +51,10 @@ func New() (*Client, error) {
 	}, nil
 }
 
+func (c *Client) Close() error {
+	return syscall.Close(c.fd)
+}
+
 func (c *Client) GetVersion() int {
 	version := C.get_version(C.int(c.fd))
 
